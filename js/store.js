@@ -25,7 +25,83 @@
   const RETURNED = ['yes', 'no', 'unknown'];
 
   function empty() {
-    return { schemaVersion: SCHEMA_VERSION, activeSessionId: null, sessions: [], events: [], settings: { experiment: null } };
+    return { schemaVersion: SCHEMA_VERSION, activeSessionId: null, sessions: [], events: [], settings: { experiment: null }, declines: [], days: {} };
+  }
+
+  // ---------- 집중 저하 보고 · 하루 맥락 (모두 선택 입력, 민감 정보) ----------
+  const SYMPTOMS = ['distracted', 'sleepy', 'lethargic', 'irritable', 'drifted'];
+  const CERTAINTY = ['sure', 'estimated'];
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  /** 집중 저하 보고. onsetFrom~onsetTo는 '흐려졌다고 느낀' 자기보고 시각(범위), recordedAt은 입력한 시각 */
+  function normDecline(x) {
+    if (!x || !x.id || !Number.isFinite(x.onsetFrom)) return null;
+    let a = x.onsetFrom;
+    let b = Number.isFinite(x.onsetTo) ? x.onsetTo : a;
+    if (b < a) [a, b] = [b, a];
+    const symptoms = [...new Set(Array.isArray(x.symptoms) ? x.symptoms.filter((v) => SYMPTOMS.includes(v)) : [])];
+    return {
+      id: String(x.id),
+      eventId: x.eventId ? String(x.eventId) : null,
+      onsetFrom: a,
+      onsetTo: b,
+      onsetCertainty: oneOf(x.onsetCertainty, CERTAINTY) || 'sure',
+      symptoms,
+      note: str(x.note, 300),
+      tz: x.tz ? String(x.tz) : null,
+      tzOffsetMin: num(x.tzOffsetMin),
+      recordedAt: num(x.recordedAt) != null ? x.recordedAt : a,
+      createdAt: num(x.createdAt) != null ? x.createdAt : a,
+      updatedAt: num(x.updatedAt) != null ? x.updatedAt : a,
+    };
+  }
+
+  /**
+   * 하루 맥락. dose.status: 'taken' | 'not-taken' | null(미기록 — 복용 안 함과 다름)
+   * dose.times: 복용 시각 후보(1~3개, 절대 시각 ms). 후보가 여럿이면 기억이 불확실하다는 뜻.
+   * dose.multiple: 이날 여러 번 복용 → 경과시간 비교에서 제외
+   */
+  function normDay(x) {
+    if (!x || typeof x !== 'object') return null;
+    const dose = x.dose || {};
+    const times = Array.isArray(dose.times) ? [...new Set(dose.times.filter((t) => Number.isFinite(t)))].sort((p, q) => p - q).slice(0, 3) : [];
+    const sleep = x.sleep || {};
+    const meal = x.meal || {};
+    const hours = Number.isFinite(sleep.hours) && sleep.hours >= 0 && sleep.hours <= 24 ? sleep.hours : null;
+    return {
+      dose: {
+        status: oneOf(dose.status, ['taken', 'not-taken']),
+        times,
+        certainty: oneOf(dose.certainty, CERTAINTY) || (times.length > 1 ? 'estimated' : 'sure'),
+        multiple: !!dose.multiple,
+      },
+      sleep: { hours, short: typeof sleep.short === 'boolean' ? sleep.short : null },
+      meal: { skipped: typeof meal.skipped === 'boolean' ? meal.skipped : null, time: num(meal.time) },
+      load: oneOf(x.load, ['light', 'normal', 'high']),
+      note: str(x.note, 300),
+      tzOffsetMin: num(x.tzOffsetMin),
+      updatedAt: num(x.updatedAt) != null ? x.updatedAt : 0,
+    };
+  }
+
+  function normDeclines(list) {
+    const seen = new Set();
+    const out = [];
+    for (const x of Array.isArray(list) ? list : []) {
+      const n = normDecline(x);
+      if (n && !seen.has(n.id)) { seen.add(n.id); out.push(n); }
+    }
+    return out.sort((p, q) => p.onsetFrom - q.onsetFrom);
+  }
+  function normDays(obj) {
+    const out = {};
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return out;
+    for (const k of Object.keys(obj).sort()) {
+      if (!DATE_RE.test(k)) continue;
+      const n = normDay(obj[k]);
+      if (n) out[k] = n;
+    }
+    return out;
   }
 
   /** 선택적 설정. 지금은 '다음 세션에서 해볼 실험' 하나만 둔다 */
@@ -241,6 +317,8 @@
     const active = d.sessions.find((s) => s.id === raw.activeSessionId && s.endAt == null);
     d.activeSessionId = active ? active.id : null;
     d.settings = normSettings(raw.settings);
+    d.declines = normDeclines(raw.declines);
+    d.days = normDays(raw.days);
     // 활성 세션이 아닌데 endAt이 없는 세션은 종료 시각을 알 수 없으므로 신뢰 불가로 닫음
     for (const s of d.sessions) {
       if (s.endAt == null && s.id !== d.activeSessionId) {
@@ -355,6 +433,13 @@
     return { data: d, dropped: Math.max(0, dropped) };
   }
 
+  /** 날짜 키 기준 병합. 같은 날짜면 updatedAt이 더 최신인 쪽 */
+  function mergeDays(a, b) {
+    const out = { ...a };
+    for (const [k, v] of Object.entries(b)) if (!out[k] || (v.updatedAt || 0) > (out[k].updatedAt || 0)) out[k] = v;
+    return out;
+  }
+
   /** id 기준 병합. 같은 id면 updatedAt이 더 최신인 쪽을 유지 */
   function merge(base, incoming) {
     const pick = (a, b) => {
@@ -374,6 +459,8 @@
       data: {
         schemaVersion: SCHEMA_VERSION, activeSessionId: base.activeSessionId, sessions: s.list, events: e.list.sort((a, b) => a.ts - b.ts),
         settings: normSettings(base.settings),
+        declines: pick(base.declines || [], incoming.declines || []).list.sort((p, q) => p.onsetFrom - q.onsetFrom),
+        days: mergeDays(base.days || {}, incoming.days || {}),
       },
       addedEvents: e.added, updatedEvents: e.updated, addedSessions: s.added,
     };
@@ -424,7 +511,11 @@
   }
 
   /** 자기설명형 JSON (후속 분석·LLM 입력에 적합) */
-  function toJSON(data) {
+  function toJSON(data, opts) {
+    const includeSensitive = !opts || opts.includeSensitive !== false;
+    const sensitive = includeSensitive
+      ? { declines: data.declines || [], days: data.days || {} }
+      : { sensitiveExcluded: true };
     return JSON.stringify({
       schema: 'focus-tracker',
       schemaVersion: SCHEMA_VERSION,
@@ -436,16 +527,21 @@
         'returned=unknown은 복귀 여부를 기록하지 않았다는 뜻이다.',
         'endReason=stale-closed 세션은 종료 시각을 알 수 없어 시간당 비율 계산에서 제외된다.',
         'chainLink는 예약 필드이며 자동으로 확정하지 않는다.',
+        'declines는 사용자가 "집중이 흐려졌다"고 직접 남긴 자기보고이며, events(아차 기록)를 자동 분류한 것이 아니다.',
+        'days[날짜].dose.status=null은 미기록(복용 안 함과 다름). dose.times가 여럿이면 기억이 불확실한 후보 시각이다.',
+        '이 데이터는 진단이나 복용 조언의 근거가 아니다.',
       ],
       settings: data.settings || { experiment: null },
       sessions: data.sessions,
       events: data.events,
+      ...sensitive,
     }, null, 2);
   }
 
   return {
     KEY, KEY_V1, SCHEMA_VERSION, STALE_SESSION_MS, TASK_TYPES, ACTIVITIES, TRIGGERS, RETURNED,
     empty, uid, currentTz, offsetAt, inferTaskType, newSession, newEvent,
+    SYMPTOMS, CERTAINTY, normDecline, normDay, mergeDays,
     CORRUPT_PREFIX, normalize, normSettings, migrateV1, isV1, closeStaleSessions, load, quarantine, save, clearAll,
     parseImport, merge, localIso, toCSV, toJSON,
   };

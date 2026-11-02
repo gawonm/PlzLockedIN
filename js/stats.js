@@ -368,14 +368,14 @@
   };
 
   const ACTIVITY_TRY = {
-    search: '궁금한 단어·개념은 검색하지 말고 "💭 생각 적어두기"에 검색어만 남겨 두고, 쉬는 시간에 한 번에 찾아보세요.',
+    search: '궁금한 단어·개념은 검색하지 말고 "생각 한 줄 맡기기"에 검색어만 남겨 두고, 쉬는 시간에 한 번에 찾아보세요.',
     messenger: '세션을 시작할 때 메신저 알림을 끄거나 폰을 손이 닿지 않는 곳에 두는 것부터 해 보세요.',
     'other-task': '떠오른 다른 작업은 보관함에 한 줄만 적고, 세션의 첫 행동으로 돌아가 보세요.',
     moving: '자리를 뜨게 되는 이유(물, 화장실, 정리 등)를 세션 시작 전에 미리 처리해 보세요.',
     other: '자세히 기록한 메모를 세션이 끝난 뒤 한 번만 훑어보며 공통점을 찾아보세요.',
   };
   const TRIGGER_TRY = {
-    thought: '떠오른 생각을 잃을까 봐 따라가게 된다면 "💭 생각 적어두기"로 보관하고 돌아오는 연습을 해 보세요.',
+    thought: '떠오른 생각을 잃을까 봐 따라가게 된다면 "생각 한 줄 맡기기"로 보관하고 돌아오는 연습을 해 보세요.',
     notification: '세션 동안 방해 금지 모드를 켜 보세요.',
     person: '세션 중임을 주변에 알리거나, 방해가 적은 장소를 골라 보세요.',
     noise: '이어폰·자리 이동처럼 환경을 바꿀 수 있는 작은 방법을 시도해 보세요.',
@@ -512,6 +512,189 @@
     return out;
   }
 
+  // ───────── 집중 저하 시간 패턴 (제안서: docs/FOCUS_DECLINE_PATTERN_PROPOSAL.md) ─────────
+  // 원칙: 날짜 단위로 센다 · 추정은 범위로 · 연결이 불명확하면 제외 · 우세한 패턴을 자동 판정하지 않는다
+  const DECLINE_MIN_DAYS = 5; // 비교를 '시작'하는 제품상 기준. 통계적·의학적 타당성 기준이 아님
+  const SYMPTOM_META = [
+    { id: 'distracted', label: '산만함' },
+    { id: 'sleepy', label: '졸림·피로' },
+    { id: 'lethargic', label: '무기력' },
+    { id: 'irritable', label: '짜증·초조' },
+    { id: 'drifted', label: '다른 일로 이탈' },
+  ];
+  const LINK_LABELS = {
+    linked: '복용 정보와 연결',
+    'no-dose-info': '복용 미기록',
+    'no-dose-time': '복용 시각 미기록',
+    'not-taken': '복용 안 한 날',
+    ambiguous: '연결 불명확',
+    multiple: '여러 번 복용한 날',
+  };
+
+  function minutesOfDay(ts) {
+    const d = new Date(ts);
+    const mid = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    return (ts - mid) / MIN; // DST 날에도 실제 경과 분
+  }
+
+  /**
+   * 집중 저하 보고 하나를 복용 정보와 연결.
+   * 발생 시각 기준 24시간 안의 복용(같은 날 또는 전날)만 후보. 후보가 하나일 때만 연결한다.
+   */
+  function linkDose(decline, days) {
+    const from = decline.onsetFrom;
+    const keys = [...new Set([dateKey(from), dateKey(from - 24 * HOUR)])];
+    const cands = [];
+    let notTaken = false;
+    let noTime = false;
+    for (const k of keys) {
+      const day = days && days[k];
+      if (!day || !day.dose) continue;
+      if (day.dose.status === 'not-taken' && k === dateKey(from)) notTaken = true;
+      if (day.dose.status !== 'taken') continue;
+      const ts = day.dose.times || [];
+      if (!ts.length) { if (k === dateKey(from)) noTime = true; continue; }
+      const within = ts.filter((t) => t <= from && from - t <= 24 * HOUR);
+      if (!within.length) continue;
+      cands.push({ key: k, day, partial: within.length !== ts.length });
+    }
+    if (!cands.length) return { status: notTaken ? 'not-taken' : noTime ? 'no-dose-time' : 'no-dose-info' };
+    if (cands.length > 1 || cands[0].partial) return { status: 'ambiguous' };
+    const c = cands[0];
+    if (c.day.dose.multiple) return { status: 'multiple' };
+    const ts = c.day.dose.times;
+    return {
+      status: 'linked',
+      doseKey: c.key,
+      doseTimes: ts,
+      elapsedFrom: from - ts[ts.length - 1], // 가장 늦은 복용 후보 기준 최소 경과
+      elapsedTo: decline.onsetTo - ts[0], // 가장 이른 복용 후보 기준 최대 경과
+      doseEstimated: ts.length > 1 || c.day.dose.certainty === 'estimated',
+    };
+  }
+
+  /**
+   * 날짜별 범위 목록에서 width 폭 창이 가장 많은 '날'을 덮는 위치.
+   * 읽기 쉬운 정각 창(예: 16~17시)을 먼저 찾고, step 단위로 어긋난 창은 더 많은 날을 덮을 때만 쓴다.
+   */
+  function bestWindow(dayRanges, width, step, lo, hi) {
+    const cover = (a) => dayRanges.filter((rs) => rs.some(([x, y]) => y >= a && x < a + width)).length;
+    let best = null;
+    for (let a = lo; a + width <= hi; a += width) {
+      const count = cover(a);
+      if (!best || count > best.count) best = { start: a, end: a + width, count };
+    }
+    for (let a = lo; a + width <= hi; a += step) {
+      const count = cover(a);
+      if (count > best.count) best = { start: a, end: a + width, count };
+    }
+    return best;
+  }
+
+  function fmtClockWindow(a, b) {
+    const f = (m) => { const h = Math.floor(m / 60) % 24; const mm = Math.round(m % 60); return mm ? `${h}:${String(mm).padStart(2, '0')}` : `${h}`; };
+    const onHour = a % 60 === 0 && b % 60 === 0;
+    return onHour ? `${f(a)}~${f(b)}시` : `${f(a)}~${f(b)}`;
+  }
+  function fmtHours(m) {
+    const h = m / 60;
+    return Number.isInteger(h) ? `${h}` : h.toFixed(1).replace(/\.0$/, '');
+  }
+
+  function declineAnalysis(data) {
+    const declines = (data.declines || []).slice().sort((a, b) => a.onsetFrom - b.onsetFrom);
+    const days = data.days || {};
+    const byDay = new Map();
+    for (const d of declines) {
+      const k = dateKey(d.onsetFrom);
+      if (!byDay.has(k)) byDay.set(k, { key: k, items: [] });
+      const from = minutesOfDay(d.onsetFrom);
+      const to = Math.min(24 * 60, from + (d.onsetTo - d.onsetFrom) / MIN);
+      const link = linkDose(d, days);
+      byDay.get(k).items.push({ id: d.id, from, to, estimated: d.onsetCertainty === 'estimated', link, symptoms: d.symptoms || [] });
+    }
+    const rows = [...byDay.values()].map((r) => {
+      const linked = r.items.filter((i) => i.link.status === 'linked');
+      const order = ['ambiguous', 'multiple', 'not-taken', 'no-dose-time', 'no-dose-info'];
+      const reasons = r.items.map((i) => i.link.status);
+      return {
+        ...r,
+        estimatedClock: r.items.some((i) => i.estimated),
+        linked: linked.length > 0,
+        estimatedElapsed: linked.some((i) => i.estimated || i.link.doseEstimated),
+        excludeReason: linked.length ? null : order.find((o) => reasons.includes(o)) || 'no-dose-info',
+        context: days[r.key] || null,
+      };
+    });
+
+    const clockRanges = rows.map((r) => r.items.map((i) => [i.from, i.to]));
+    const clockSure = rows.map((r) => r.items.filter((i) => !i.estimated).map((i) => [i.from, i.to])).filter((x) => x.length);
+    const linkedRows = rows.filter((r) => r.linked);
+    const elapsedRanges = linkedRows.map((r) => r.items.filter((i) => i.link.status === 'linked').map((i) => [i.link.elapsedFrom / MIN, i.link.elapsedTo / MIN]));
+    const elapsedSure = linkedRows
+      .map((r) => r.items.filter((i) => i.link.status === 'linked' && !i.estimated && !i.link.doseEstimated).map((i) => [i.link.elapsedFrom / MIN, i.link.elapsedTo / MIN]))
+      .filter((x) => x.length);
+
+    const clockReady = rows.length >= DECLINE_MIN_DAYS;
+    const elapsedReady = linkedRows.length >= DECLINE_MIN_DAYS;
+    const clockBest = rows.length ? bestWindow(clockRanges, 60, 15, 0, 24 * 60) : null;
+    const clockBestSure = clockSure.length ? bestWindow(clockSure, 60, 15, 0, 24 * 60) : null;
+    const elapsedBest = linkedRows.length ? bestWindow(elapsedRanges, 60, 30, 0, 24 * 60) : null;
+    const elapsedBestSure = elapsedSure.length ? bestWindow(elapsedSure, 60, 30, 0, 24 * 60) : null;
+
+    // 복용 시각이 날마다 비슷하면(±30분) 시계 시간과 경과시간을 구분하기 어렵다
+    const doseMids = linkedRows.map((r) => {
+      const l = r.items.find((i) => i.link.status === 'linked').link;
+      return (minutesOfDay(l.doseTimes[0]) + minutesOfDay(l.doseTimes[l.doseTimes.length - 1])) / 2;
+    });
+    const doseSimilar = doseMids.length >= 2 && Math.max(...doseMids) - Math.min(...doseMids) <= 60;
+    const sensitiveClock = !!(clockReady && clockBestSure && clockSure.length >= 3 && clockBestSure.start !== clockBest.start);
+    const sensitiveElapsed = !!(elapsedReady && elapsedBestSure && elapsedSure.length >= 3 && elapsedBestSure.start !== elapsedBest.start);
+
+    const excluded = {};
+    for (const r of rows) if (r.excludeReason) excluded[r.excludeReason] = (excluded[r.excludeReason] || 0) + 1;
+
+    const counts = {
+      observedDays: rows.length,
+      clockDays: rows.length,
+      elapsedDays: linkedRows.length,
+      estimatedDays: rows.filter((r) => r.estimatedClock || r.estimatedElapsed).length,
+      excludedDays: rows.length - linkedRows.length,
+      excluded,
+      reports: declines.length,
+    };
+
+    let observation;
+    if (!clockReady) {
+      observation = {
+        ready: false,
+        fact: `아직 관찰 중이에요. 현재 비교 가능한 날은 ${rows.length}일이에요.`,
+        limit: '미기록 시간의 집중 상태는 알 수 없어요.',
+        try: null,
+      };
+    } else {
+      const win = fmtClockWindow(clockBest.start, clockBest.end);
+      let fact = `비교 가능한 ${rows.length}일 중 ${clockBest.count}일에 ${win} 집중 저하를 기록했어요.`;
+      if (elapsedReady) fact += ` 복용 후 경과시간으로는 연결 가능한 ${linkedRows.length}일 중 ${elapsedBest.count}일이 ${fmtHours(elapsedBest.start)}~${fmtHours(elapsedBest.end)}시간 사이였어요.`;
+      const limits = ['미기록 시간의 집중 상태는 알 수 없고, 이 기록만으로 원인을 알 수는 없어요.'];
+      if (!elapsedReady) limits.push(`복용 정보와 연결된 날이 ${linkedRows.length}일이라 복용 후 경과시간 비교는 아직 하지 않아요.`);
+      if (doseSimilar) limits.push('복용 시각이 날마다 비슷해서, 시계 시간과 복용 후 경과시간 중 어느 쪽과 더 관련 있는지는 아직 구분하기 어려워요.');
+      if (sensitiveClock || sensitiveElapsed) limits.push('추정 시각에 따라 관찰이 달라져요.');
+      limits.push('특정 시간에만 앱을 열었다면 그 시간의 기록이 많아 보일 수 있어요.');
+      observation = {
+        ready: true,
+        fact,
+        limit: limits.join(' '),
+        try: `${win} 무렵의 작업량과 휴식 여부를 함께 돌아보기`,
+      };
+    }
+
+    return {
+      rows, counts, clockReady, elapsedReady, clockBest, clockBestSure, elapsedBest, elapsedBestSure,
+      doseSimilar, sensitiveClock, sensitiveElapsed, observation,
+    };
+  }
+
   /** 미리보기용 데모 데이터 (저장하지 않음). seed 고정 → 테스트 재현 가능 */
   function generateDemoData(now, days) {
     now = now != null ? now : Date.now();
@@ -561,5 +744,6 @@
     monthHourMatrix, dailyCounts, countLevel, focusMsByDay, hourlyExposure, hourlyDistribution,
     sessionStats, byTaskType, tagCounts, weekStart, weeklyTrend, sufficiency, buildReport, insights, pickInsight, recentDays,
     generateDemoData,
+    DECLINE_MIN_DAYS, SYMPTOM_META, LINK_LABELS, minutesOfDay, linkDose, bestWindow, fmtClockWindow, fmtHours, declineAnalysis,
   };
 });

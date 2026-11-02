@@ -194,3 +194,96 @@ test('recentDays: 기록 없는 날도 포함(0), 월 경계', () => {
   assert.equal(d.length, 7);
   assert.deepEqual(d.slice(-3).map((x) => [x.month, x.day, x.count]), [[10, 31, 1], [11, 1, 2], [11, 2, 0]]);
 });
+
+// ───────── 집중 저하 시간 패턴 (제안서 §7 검증 항목) ─────────
+const dec = (id, from, to, extra = {}) => ({ id, eventId: null, onsetFrom: from, onsetTo: to ?? from, onsetCertainty: 'sure', symptoms: [], note: '', ...extra });
+const dose = (times, extra = {}) => ({ dose: { status: 'taken', times, certainty: times.length > 1 ? 'estimated' : 'sure', multiple: false, ...extra }, sleep: { hours: null, short: null }, meal: { skipped: null, time: null }, load: null, note: '' });
+
+test('제안서 사례: 복용 07:30/08:30 후보 + 16:30~17:00 저하 → 경과 8~9.5시간 범위(평균으로 확정하지 않음)', () => {
+  const d = dec('a', at(2026, 10, 2, 16, 30), at(2026, 10, 2, 17, 0), { onsetCertainty: 'estimated' });
+  const l = S.linkDose(d, { '2026-11-02': dose([at(2026, 10, 2, 7, 30), at(2026, 10, 2, 8, 30)]) });
+  assert.equal(l.status, 'linked');
+  assert.equal(l.elapsedFrom / HOUR, 8);
+  assert.equal(l.elapsedTo / HOUR, 9.5);
+  assert.equal(l.doseEstimated, true);
+});
+
+test('자정 경계: 전날 23:00 복용, 다음날 01:00 저하 → 2시간 (단순 시각 빼기 아님)', () => {
+  const l = S.linkDose(dec('a', at(2026, 10, 3, 1, 0)), { '2026-11-02': dose([at(2026, 10, 2, 23, 0)]) });
+  assert.equal(l.status, 'linked');
+  assert.equal(l.elapsedFrom / HOUR, 2);
+});
+
+test('연결하지 않는 경우: 미기록 / 복용 안 함 / 시각 미기록 / 저하 뒤에 복용 / 여러 번 복용', () => {
+  const t = at(2026, 10, 2, 16);
+  assert.equal(S.linkDose(dec('a', t), {}).status, 'no-dose-info');
+  assert.equal(S.linkDose(dec('a', t), { '2026-11-02': { dose: { status: 'not-taken', times: [] } } }).status, 'not-taken');
+  assert.equal(S.linkDose(dec('a', t), { '2026-11-02': { dose: { status: 'taken', times: [] } } }).status, 'no-dose-time');
+  // 후보 중 하나가 저하 이후 → 어느 쪽인지 불명확
+  assert.equal(S.linkDose(dec('a', t), { '2026-11-02': dose([at(2026, 10, 2, 8), at(2026, 10, 2, 17)]) }).status, 'ambiguous');
+  // 전날·당일 모두 24시간 안 복용 → 불명확
+  assert.equal(S.linkDose(dec('a', at(2026, 10, 3, 7)), { '2026-11-02': dose([at(2026, 10, 2, 8)]), '2026-11-03': dose([at(2026, 10, 3, 6)]) }).status, 'ambiguous');
+  assert.equal(S.linkDose(dec('a', t), { '2026-11-02': dose([at(2026, 10, 2, 8)], { multiple: true }) }).status, 'multiple');
+});
+
+function fiveDays({ doseHour = (i) => 8, onsetHour = (i) => 16, estimated = () => false } = {}) {
+  const declines = [];
+  const days = {};
+  for (let i = 0; i < 5; i++) {
+    const day = 2 + i;
+    days[`2026-11-${String(day).padStart(2, '0')}`] = dose([at(2026, 10, day, doseHour(i))]);
+    declines.push(dec(`d${i}`, at(2026, 10, day, onsetHour(i), 30), at(2026, 10, day, onsetHour(i) + 1, 0), { onsetCertainty: estimated(i) ? 'estimated' : 'sure' }));
+  }
+  return { sessions: [], events: [], declines, days };
+}
+
+test('5일 미만이면 해석하지 않음, 같은 날 여러 번 기록은 하루로', () => {
+  const data = fiveDays();
+  data.declines = data.declines.slice(0, 4);
+  data.declines.push(dec('same-day', at(2026, 10, 2, 10)), dec('same-day2', at(2026, 10, 2, 11)));
+  const r = S.declineAnalysis(data);
+  assert.equal(r.counts.observedDays, 4);
+  assert.equal(r.counts.reports, 6);
+  assert.equal(r.clockReady, false);
+  assert.match(r.observation.fact, /아직 관찰 중이에요. 현재 비교 가능한 날은 4일/);
+  assert.match(r.observation.limit, /미기록 시간의 집중 상태는 알 수 없어요/);
+});
+
+test('복용 시각이 일정하면 두 축을 구분하기 어렵다고 표시(우세 판정 없음)', () => {
+  const r = S.declineAnalysis(fiveDays());
+  assert.equal(r.clockReady, true);
+  assert.equal(r.elapsedReady, true);
+  assert.equal(r.doseSimilar, true);
+  assert.match(r.observation.fact, /비교 가능한 5일 중 5일에 16~17시 집중 저하/);
+  assert.match(r.observation.limit, /구분하기 어려워요/);
+  assert.doesNotMatch(JSON.stringify(r.observation), /복용량|복용 시각을 바꾸|약효|치료|진단/);
+});
+
+test('복용 시각이 다르면 경과시간 축을 따로 보여 줌, 미연결 날은 제외 일수로', () => {
+  const data = fiveDays({ doseHour: (i) => 7 + i, onsetHour: (i) => 15 + i });
+  data.declines.push(dec('x', at(2026, 10, 9, 16)));
+  const r = S.declineAnalysis(data);
+  assert.equal(r.doseSimilar, false);
+  assert.equal(r.counts.observedDays, 6);
+  assert.equal(r.counts.elapsedDays, 5);
+  assert.equal(r.counts.excludedDays, 1);
+  assert.equal(r.counts.excluded['no-dose-info'], 1);
+  assert.match(r.observation.fact, /복용 후 경과시간으로는 연결 가능한 5일 중 5일이 8~9시간/);
+});
+
+test('확실한 입력만 본 결과와 추정 포함 결과가 다르면 표시', () => {
+  // 추정 3일은 13시대, 확실 3일은 18시대
+  const data = fiveDays({ onsetHour: (i) => (i < 3 ? 13 : 18), estimated: (i) => i < 3 });
+  data.declines.push(dec('s5', at(2026, 10, 9, 18, 30), at(2026, 10, 9, 19)));
+  data.days['2026-11-09'] = dose([at(2026, 10, 9, 8)]);
+  const r = S.declineAnalysis(data);
+  assert.equal(r.sensitiveClock, true);
+  assert.match(r.observation.limit, /추정 시각에 따라 관찰이 달라져요/);
+});
+
+test('DST 날에도 하루 중 분(minutesOfDay)과 경과시간이 실제 경과 기준', () => {
+  const dst = at(2026, 2, 8, 16); // 미국 DST 시작일 (다른 TZ에선 일반 날)
+  const l = S.linkDose(dec('a', dst), { '2026-03-08': dose([at(2026, 2, 8, 8)]) });
+  assert.equal(l.status, 'linked');
+  assert.equal(l.elapsedFrom, dst - at(2026, 2, 8, 8));
+});
