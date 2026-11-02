@@ -1,0 +1,14 @@
+{
+  "name": "집중 트래커",
+  "short_name": "집중트래커",
+  "description": "딴생각을 알아차린 순간 1초 만에 기록하는 성인 ADHD용 집중 로그",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f5fb",
+  "theme_color": "#7c6cf0",
+  "lang": "ko",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>집중 트래커</title>
+  <meta name="description" content="딴생각을 알아차린 순간 1초 만에 기록하는 성인 ADHD용 집중 로그" />
+  <meta name="theme-color" content="#7c6cf0" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="banner" class="banner" hidden></div>
+
+  <header class="top">
+    <h1>집중 트래커</h1>
+    <span id="lockBadge" class="lock-badge" hidden>🔒 세션 중</span>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="now" role="tab">⏱ 지금</button>
+    <button class="tab" data-tab="tracker" role="tab" data-lockable>🟩 트래커</button>
+    <button class="tab" data-tab="parking" role="tab" data-lockable>🅿️ 주차장</button>
+    <button class="tab" data-tab="report" role="tab" data-lockable>📊 리포트</button>
+  </nav>
+
+  <main>
+    <!-- 지금 -->
+    <section id="tab-now" class="panel active">
+      <div id="idleSession" class="card">
+        <h2>무엇에 집중할 건가요?</h2>
+        <div class="chips" id="labelChips">
+          <button class="chip" data-label="수업">수업</button>
+          <button class="chip" data-label="업무">업무</button>
+          <button class="chip" data-label="공부">공부</button>
+          <button class="chip" data-label="과제">과제</button>
+        </div>
+        <input id="labelInput" class="input" maxlength="30" placeholder="직접 입력 (예: 데이터베이스 수업)" />
+        <input id="anchorInput" class="input" maxlength="60" placeholder="복귀 앵커 (선택) — 예: 교안 3장부터, 슬라이드 12" />
+        <button id="startBtn" class="btn primary block">집중 시작</button>
+        <p class="muted small">세션이 시작되면 통계·주차장 탭이 잠겨요. 기록하러 들어왔다가 다른 데 빠지지 않도록요.</p>
+      </div>
+
+      <div id="activeSession" class="card session" hidden>
+        <div class="session-head">
+          <div>
+            <div class="muted small">지금 하는 일</div>
+            <div id="sessionLabel" class="session-label"></div>
+          </div>
+          <div class="timer" id="sessionTimer">00:00</div>
+        </div>
+        <div class="anchor-row">
+          <span class="muted small">📍 복귀 앵커</span>
+          <input id="anchorLive" class="input slim" maxlength="60" placeholder="어디까지 했는지 (예: 슬라이드 12)" />
+        </div>
+        <div class="streak">마지막 흔들림 이후 <b id="streak">-</b> 집중 중</div>
+        <div class="counts"><span>🅿️ <b id="cntPark">0</b></span><span>↩️ <b id="cntRet">0</b></span></div>
+      </div>
+
+      <div class="big-buttons">
+        <button id="parkBtn" class="big park">
+          <span class="big-emoji">🅿️</span>
+          <span class="big-title">주차하기</span>
+          <span class="big-sub">딴생각이 떠올랐어요 (아직 안 갔음) · P</span>
+        </button>
+        <button id="returnBtn" class="big ret">
+          <span class="big-emoji">↩️</span>
+          <span class="big-title">아차, 다녀왔다</span>
+          <span class="big-sub">이미 딴짓하고 돌아왔어요 · Space</span>
+        </button>
+      </div>
+
+      <button id="endBtn" class="btn ghost block" hidden>세션 종료</button>
+    </section>
+
+    <!-- 트래커 -->
+    <section id="tab-tracker" class="panel">
+      <div class="locked-msg">🔒 세션이 끝나면 볼 수 있어요.<br /><span class="muted small">지금은 하던 일로 돌아가세요.</span></div>
+      <div class="lockable-content">
+        <div class="card">
+          <div class="row between">
+            <button class="btn ghost sm" id="prevMonth" aria-label="이전 달">‹</button>
+            <h2 id="monthTitle" class="center"></h2>
+            <button class="btn ghost sm" id="nextMonth" aria-label="다음 달">›</button>
+          </div>
+          <p class="muted small center">Month in Pixels · 날짜 × 시간대별 흔들림 횟수</p>
+          <div class="grid-wrap"><div id="monthGrid" class="month-grid"></div></div>
+          <div class="legend" id="monthLegend"></div>
+        </div>
+        <div class="card">
+          <div class="row between">
+            <button class="btn ghost sm" id="prevYear" aria-label="이전 해">‹</button>
+            <h2 id="yearTitle" class="center"></h2>
+            <button class="btn ghost sm" id="nextYear" aria-label="다음 해">›</button>
+          </div>
+          <p class="muted small center">Year in Pixels · 하루 집중 상태 (세션 1시간당 흔들림 횟수)</p>
+          <div class="grid-wrap"><div id="yearGrid" class="year-grid"></div></div>
+          <div class="legend" id="yearLegend"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 주차장 / 정리함 -->
+    <section id="tab-parking" class="panel">
+      <div class="locked-msg">🔒 주차한 생각은 세션이 끝나면 꺼내 볼 수 있어요.<br /><span class="muted small">잘 적어 뒀으니 지금은 잊어도 괜찮아요.</span></div>
+      <div class="lockable-content">
+        <div class="card">
+          <h2>🅿️ 주차장 <span class="muted small" id="parkCount"></span></h2>
+          <p class="muted small">쉬는 시간에 한 번에 처리하세요. 처리했으면 체크!</p>
+          <ul id="parkList" class="list"></ul>
+          <details>
+            <summary class="muted small">처리한 생각 보기</summary>
+            <ul id="parkDoneList" class="list"></ul>
+          </details>
+        </div>
+        <div class="card">
+          <h2>🗂 정리함 <span class="muted small">최근 기록 50개</span></h2>
+          <p class="muted small">분류가 비어 있으면 여기서 채워 주세요. 리포트가 더 정확해져요.</p>
+          <ul id="logList" class="list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 리포트 -->
+    <section id="tab-report" class="panel">
+      <div class="locked-msg">🔒 리포트는 세션이 끝나면 볼 수 있어요.</div>
+      <div class="lockable-content">
+        <div id="reportPending" class="card" hidden>
+          <h2>데이터를 모으는 중이에요</h2>
+          <p class="muted">기록 <b id="rpEvents"></b> · 기록한 날 <b id="rpDays"></b></p>
+          <div class="progress"><div id="rpBar"></div></div>
+          <p class="muted small">버튼만 눌러도 충분해요. 데이터가 모이면 나만의 집중 패턴을 분석해 드려요.</p>
+          <button id="demoBtn" class="btn ghost">데모 데이터로 리포트 미리보기</button>
+        </div>
+        <div id="demoNotice" class="card notice" hidden>
+          👀 데모 데이터 미리보기 중이에요. 실제 기록은 바뀌지 않습니다.
+          <button id="demoExit" class="btn ghost sm">미리보기 끄기</button>
+        </div>
+        <div id="reportBody" hidden>
+          <div class="kpis" id="kpis"></div>
+          <div class="card"><h2>💡 나를 위한 제안</h2><div id="insights"></div></div>
+          <div class="card"><h2>⏰ 시간대별 흔들림 (세션 1시간당)</h2><div id="hourBars" class="hbars"></div></div>
+          <div class="card"><h2>🏷 무엇이 나를 끌어가나</h2><div id="catBars"></div></div>
+          <div class="card"><h2>📅 요일별</h2><div id="weekBars" class="wbars"></div></div>
+        </div>
+        <div class="card">
+          <h2>💾 데이터</h2>
+          <p class="muted small">데이터는 이 브라우저에만 저장돼요. 가끔 JSON으로 백업하세요. JSON은 나중에 LLM·MCP 분석에 바로 넣을 수 있는 형식이에요.</p>
+          <div class="row wrap">
+            <button id="exportCsv" class="btn ghost sm">CSV 내보내기</button>
+            <button id="exportJson" class="btn ghost sm">JSON 백업</button>
+            <label class="btn ghost sm">JSON 가져오기<input id="importJson" type="file" accept="application/json,.json" hidden /></label>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 퀵캡처 시트 -->
+  <div id="sheetBackdrop" class="backdrop" hidden></div>
+  <div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" hidden>
+    <div class="countdown"><div id="countdownBar"></div></div>
+    <div class="sheet-head">
+      <h3 id="sheetTitle"></h3>
+      <span class="muted small" id="sheetSaved">✓ 시간 기록됨</span>
+    </div>
+    <p class="muted small" id="sheetHint">선택 사항이에요. 몇 초 뒤 자동으로 저장하고 닫혀요.</p>
+    <div class="chips" id="catChips"></div>
+    <div class="chips" id="durChips"></div>
+    <input id="noteInput" class="input" maxlength="80" placeholder="" autocomplete="off" />
+    <div class="row">
+      <button id="sheetDone" class="btn primary grow">저장하고 돌아가기 ↵</button>
+    </div>
+  </div>
+
+  <!-- 복귀 앵커 -->
+  <div id="anchor" class="anchor" hidden>
+    <div class="anchor-inner">
+      <div class="anchor-small">기록 완료 · 이제 돌아가세요</div>
+      <div class="anchor-big" id="anchorTask"></div>
+      <div class="anchor-note" id="anchorNote"></div>
+    </div>
+  </div>
+
+  <script src="js/stats.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
