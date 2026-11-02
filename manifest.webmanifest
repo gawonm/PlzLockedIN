@@ -1,0 +1,14 @@
+{
+  "name": "집중 트래커",
+  "short_name": "집중트래커",
+  "description": "주의가 흐트러진 걸 알아차린 순간 한 번 누르고, 하던 일로 바로 돌아가게 돕는 기록 앱",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f8f5f4",
+  "theme_color": "#f3d3da",
+  "lang": "ko",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

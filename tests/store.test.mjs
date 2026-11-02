@@ -1,0 +1,179 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const Store = require('../js/store.js');
+
+const at = (y, m, d, h, mi = 0) => new Date(y, m, d, h, mi).getTime();
+
+function memStorage(init = {}) {
+  const m = { ...init };
+  return {
+    _m: m,
+    getItem: (k) => (k in m ? m[k] : null),
+    setItem: (k, v) => { m[k] = String(v); },
+    removeItem: (k) => { delete m[k]; },
+  };
+}
+
+// 1차 데모(v1)가 실제로 저장하던 형식
+const V1 = {
+  version: 1,
+  activeSessionId: 's-open',
+  sessions: [
+    { id: 's1', label: '데이터베이스 수업', anchorNote: '슬라이드 12', startAt: at(2026, 10, 2, 9), endAt: at(2026, 10, 2, 10) },
+    { id: 's-open', label: '코딩', anchorNote: '', startAt: at(2026, 10, 2, 20), endAt: null },
+  ],
+  events: [
+    { id: 'e1', sessionId: 's1', ts: at(2026, 10, 2, 9, 10), type: 'return', category: 'curious', note: '영어 단어 검색', durationBucket: 'm5', resolved: false },
+    { id: 'e2', sessionId: 's1', ts: at(2026, 10, 2, 9, 30), type: 'park', category: 'tool', note: 'VS Code 노션 익스텐션', durationBucket: null, resolved: true },
+    { id: 'e3', sessionId: null, ts: at(2026, 10, 3, 22), type: 'return', category: null, note: '', durationBucket: null, resolved: false },
+  ],
+};
+
+test('v1 → v2 마이그레이션: 건수·시각·메모 무손실, 원본은 legacy에 보존', () => {
+  const d = Store.migrateV1(V1);
+  assert.equal(d.schemaVersion, 2);
+  assert.equal(d.events.length, 3);
+  assert.equal(d.sessions.length, 2);
+  const [e1, e2, e3] = d.events;
+  assert.equal(e1.ts, V1.events[0].ts);
+  assert.equal(e1.activity, 'search');
+  assert.equal(e1.note, '영어 단어 검색');
+  assert.equal(e1.returned, 'unknown');
+  assert.deepEqual(e1.legacy, { type: 'return', category: 'curious', durationBucket: 'm5' });
+  assert.equal(e1.taskType, 'class');
+  assert.equal(e2.thought, 'VS Code 노션 익스텐션');
+  assert.equal(e2.keepForLater, true);
+  assert.equal(e2.laterDone, true);
+  assert.equal(e2.activity, 'other-task');
+  assert.equal(e3.sessionId, null);
+  assert.equal(e3.tz, null); // v1에는 타임존 정보가 없었음 → 모름
+  assert.equal(d.sessions[0].task, '데이터베이스 수업');
+  assert.equal(d.sessions[0].location, '슬라이드 12');
+  assert.equal(d.sessions[0].endReason, 'manual');
+  assert.equal(d.activeSessionId, 's-open');
+  assert.ok(d.events.every((e) => e.source === 'migrated'));
+});
+
+test('load: v2가 없으면 v1을 변환하고, v1 키는 지우지 않음', () => {
+  const st = memStorage({ 'focusTracker.v1': JSON.stringify(V1) });
+  const r = Store.load(st);
+  assert.equal(r.ok, true);
+  assert.equal(r.migratedFromV1, true);
+  assert.equal(r.data.events.length, 3);
+  assert.ok(Store.save(st, r.data));
+  assert.ok(st.getItem('focusTracker.v1'), 'v1 백업 유지');
+  // 다시 로드하면 v2를 읽고 재변환하지 않음
+  r.data.events.pop();
+  Store.save(st, r.data);
+  const r2 = Store.load(st);
+  assert.equal(r2.migratedFromV1, false);
+  assert.equal(r2.data.events.length, 2);
+});
+
+test('clearAll: v1·v2 모두 삭제 → 삭제한 데이터가 되살아나지 않음', () => {
+  const st = memStorage({ 'focusTracker.v1': JSON.stringify(V1), 'focusTracker.v2': JSON.stringify(Store.migrateV1(V1)) });
+  assert.ok(Store.clearAll(st));
+  assert.equal(Store.load(st).data.events.length, 0);
+});
+
+test('저장소 오류에도 죽지 않음', () => {
+  const broken = { getItem() { throw new Error('denied'); }, setItem() { throw new Error('quota'); }, removeItem() { throw new Error('x'); } };
+  const r = Store.load(broken);
+  assert.equal(r.ok, false);
+  assert.equal(r.data.events.length, 0);
+  assert.equal(Store.save(broken, r.data), false);
+  assert.equal(Store.clearAll(broken), false);
+});
+
+test('newEvent: 타임존·세션·생성/수정 시각 자동 기록, 상세는 비어 있음', () => {
+  const s = Store.newSession({ taskType: 'class', task: 'LangGraph 수업', location: 'Router 노드', nextAction: '코드 마지막 줄 확인' }, at(2026, 10, 2, 14));
+  const e = Store.newEvent(s, at(2026, 10, 2, 14, 10));
+  assert.equal(e.sessionId, s.id);
+  assert.equal(e.taskType, 'class');
+  assert.equal(e.returned, 'unknown');
+  assert.equal(e.chainLink, null);
+  assert.equal(e.tzOffsetMin, -new Date(e.ts).getTimezoneOffset());
+  assert.ok('tz' in e);
+  assert.equal(e.createdAt, e.ts);
+  assert.equal(e.thought, '');
+  assert.equal(e.activity, null);
+  assert.ok(!('duration' in e) && !('durationBucket' in e), '지속시간 필드 없음');
+});
+
+test('normalize: 잘못된 값 정리, 중복 id 제거, 열린 비활성 세션은 stale로 닫음', () => {
+  const n = Store.normalize({
+    schemaVersion: 2,
+    activeSessionId: 'nope',
+    sessions: [{ id: 'a', startAt: 100, endAt: null }, { id: 'bad' }],
+    events: [
+      { id: 'x', ts: 1, activity: 'hacking', returned: 'maybe' },
+      { id: 'x', ts: 2 },
+      { id: 'y' },
+    ],
+  });
+  assert.equal(n.sessions.length, 1);
+  assert.equal(n.sessions[0].endReason, 'stale-closed');
+  assert.equal(n.events.length, 1);
+  assert.equal(n.events[0].activity, null);
+  assert.equal(n.events[0].returned, 'unknown');
+  assert.equal(n.activeSessionId, null);
+});
+
+test('closeStaleSessions: 12시간 넘게 열린 세션은 마지막 기록 시각으로 닫고 신뢰 불가 표시', () => {
+  const d = Store.migrateV1(V1);
+  const open = d.sessions.find((s) => s.id === 's-open');
+  d.events.push({ ...Store.newEvent(open, open.startAt + 30 * 60000) });
+  assert.equal(Store.closeStaleSessions(d, open.startAt + 60 * 60000), null, '1시간 뒤엔 유지');
+  const closed = Store.closeStaleSessions(d, open.startAt + 13 * 3600000);
+  assert.equal(closed.id, 's-open');
+  assert.equal(closed.endAt, open.startAt + 30 * 60000);
+  assert.equal(closed.endReason, 'stale-closed');
+  assert.equal(d.activeSessionId, null);
+});
+
+test('parseImport: v1·v2 내보내기 모두 허용, 형식 오류는 명확한 에러', () => {
+  const fromV1 = Store.parseImport(JSON.stringify(V1));
+  assert.equal(fromV1.data.events.length, 3);
+  assert.equal(fromV1.data.activeSessionId, null);
+  assert.ok(fromV1.data.sessions.every((s) => s.endAt != null));
+  const exported = Store.toJSON(fromV1.data);
+  const back = Store.parseImport(exported);
+  assert.deepEqual(back.data.events, fromV1.data.events);
+  assert.throws(() => Store.parseImport('{not json'), /JSON/);
+  assert.throws(() => Store.parseImport('{"foo":1}'), /events/);
+});
+
+test('merge: id 기준, 더 최근 updatedAt 우선', () => {
+  const a = Store.migrateV1(V1);
+  const b = JSON.parse(JSON.stringify(a));
+  b.events[0].note = '수정됨';
+  b.events[0].updatedAt += 1000;
+  b.events[1].note = '오래된 값';
+  b.events[1].updatedAt -= 1000;
+  b.events.push({ ...b.events[2], id: 'new-1' });
+  const r = Store.merge(a, b);
+  assert.equal(r.addedEvents, 1);
+  assert.equal(r.updatedEvents, 1);
+  assert.equal(r.data.events.length, 4);
+  assert.equal(r.data.events.find((e) => e.id === 'e1').note, '수정됨');
+  assert.notEqual(r.data.events.find((e) => e.id === 'e2').note, '오래된 값');
+});
+
+test('CSV: 이스케이프, 그룹 내 간격, 로컬 ISO 오프셋', () => {
+  const d = Store.migrateV1(V1);
+  d.events[0].note = 'VS Code, "노션"\n익스텐션';
+  const csv = Store.toCSV(d);
+  const lines = csv.replace('﻿', '').split('\n');
+  const header = lines[0].split(',');
+  assert.equal(header[0], 'event_id');
+  assert.ok(header.includes('gap_from_prev_in_group_sec'));
+  assert.ok(csv.includes('"VS Code, ""노션""\n익스텐션"'));
+  const gi = header.indexOf('gap_from_prev_in_group_sec');
+  const e2row = lines.find((l) => l.startsWith('e2,')).split(',');
+  assert.equal(e2row[gi], '1200'); // 9:10 → 9:30
+  assert.match(Store.localIso(Date.UTC(2026, 0, 1, 0, 0), 540), /^2026-01-01T09:00:00\+09:00$/);
+  assert.match(Store.localIso(Date.UTC(2026, 0, 1, 0, 0), -300), /^2025-12-31T19:00:00-05:00$/);
+});
