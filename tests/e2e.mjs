@@ -67,7 +67,16 @@ function seededUserData(now) {
       events.push({ id: `seed-e${d}-${k}`, sessionId: sid, ts, source: 'one-tap', taskType: 'class', thought: '', activity: k < 3 ? 'search' : 'messenger', trigger: null, returned: 'unknown', note: '', keepForLater: false, laterDone: false, chainLink: null, createdAt: ts, updatedAt: ts });
     }
   }
-  return { schemaVersion: 2, activeSessionId: null, sessions, events, settings: { experiment: null } };
+  const declines = [];
+  const days = {};
+  for (let d = 6; d >= 1; d--) {
+    const base = new Date(now - d * DAY);
+    const at = (h, m) => new Date(base.getFullYear(), base.getMonth(), base.getDate(), h, m).getTime();
+    const key = `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-${String(base.getDate()).padStart(2, '0')}`;
+    days[key] = { dose: { status: 'taken', times: d % 2 ? [at(7, 30), at(8, 30)] : [at(8, 0)], certainty: d % 2 ? 'estimated' : 'sure' }, sleep: { hours: 6 }, load: 'high' };
+    declines.push({ id: `seed-d${d}`, onsetFrom: at(16, 30), onsetTo: at(17, 0), onsetCertainty: d % 2 ? 'estimated' : 'sure', symptoms: ['sleepy'] });
+  }
+  return { schemaVersion: 2, activeSessionId: null, sessions, events, settings: { experiment: null }, declines, days };
 }
 
 try {
@@ -319,6 +328,125 @@ try {
     await ctx.close();
   }
 
+  // ───────── 집중 저하 시간 패턴 (선택 기록) ─────────
+  {
+    const { ctx, page } = await fresh();
+    page.on('dialog', (d) => d.accept());
+    await page.fill('#nextActionInput', '오후 수업');
+    await page.click('#startForm button[type=submit]');
+    // 원탭은 그대로: 버튼 한 번 = 아차 기록 하나, 집중 저하 보고는 생기지 않음
+    await page.click('#oopsBtn');
+    let st = await store(page);
+    ok(st.events.length === 1 && (st.declines || []).length === 0, '원탭 기록은 집중 저하로 자동 분류하지 않음');
+    await page.click('#detailBtn');
+    ok(!(await page.isChecked('#dDecline')) && await page.isHidden('#dDeclineMore'), '상세 시트의 "집중이 흐려졌어요"는 기본 꺼짐');
+    await page.check('#dDecline');
+    st = await store(page);
+    ok(st.declines.length === 1 && st.declines[0].eventId === st.events[0].id && st.declines[0].onsetFrom === st.events[0].ts, '체크하면 기록 시각 기준 보고 생성');
+    await page.click('[data-om="custom"]');
+    await page.fill('#dOnsetFrom', '16:30');
+    await page.fill('#dOnsetTo', '17:00');
+    await page.dispatchEvent('#dOnsetTo', 'change');
+    await page.click('#dCertainty [data-ct="estimated"]');
+    await page.click('#dSymptoms [data-sy="sleepy"]');
+    st = await store(page);
+    const dd = st.declines[0];
+    const t = new Date(dd.onsetFrom);
+    ok(t.getHours() === 16 && t.getMinutes() === 30 && (dd.onsetTo - dd.onsetFrom) === 30 * 60e3, '사후 시각 범위(16:30–17:00) 저장, 기록 시각과 별도');
+    ok(dd.onsetCertainty === 'estimated' && dd.symptoms.join() === 'sleepy' && dd.recordedAt >= st.events[0].ts, '추정·증상·입력 시각 보존');
+    await page.uncheck('#dDecline');
+    ok((await store(page)).declines.length === 0, '체크 해제하면 보고 삭제');
+    await page.check('#dDecline');
+    ok(new Date((await store(page)).declines[0].onsetFrom).getMinutes() === new Date((await store(page)).events[0].ts).getMinutes(), '다시 체크하면 기록 시각 기준 새 보고');
+    await page.click('[data-om="custom"]');
+    await page.fill('#dOnsetFrom', '16:30');
+    await page.fill('#dOnsetTo', '17:00');
+    await page.dispatchEvent('#dOnsetTo', 'change');
+    await page.click('#dCertainty [data-ct="estimated"]');
+    await page.click('#sheetDone');
+    await page.waitForTimeout(900);
+    await page.click('#oopsBtn');
+    await page.click('#undoBtn');
+    ok((await store(page)).declines.length === 1, '다른 기록 되돌리기는 다른 보고에 영향 없음');
+    await page.click('#endBtn');
+
+    // 돌아보기 → 하루 맥락 적기 (제안서 사례: 07:30 또는 08:30 복용, 추정)
+    await page.click('#reviewAddDay');
+    ok(await page.isVisible('#dayForm') && (await page.locator('#dyDose .chip.on').textContent()) === '미기록', '맥락 기본값은 미기록');
+    await page.click('#dyDose [data-v="taken"]');
+    await page.fill('#dyT1', '07:30');
+    await page.fill('#dyT2', '08:30');
+    await page.fill('#dySleep', '5.5');
+    await page.click('#dyLoad [data-v="high"]');
+    await page.click('#dayForm button[type=submit]');
+    st = await store(page);
+    const today = Object.keys(st.days)[0];
+    const day = st.days[today];
+    ok(day.dose.status === 'taken' && day.dose.times.length === 2 && day.dose.certainty === 'estimated', '복용 후보 시각 두 개 → 추정으로 저장');
+    ok(day.sleep.hours === 5.5 && day.load === 'high' && day.meal.skipped === null, '수면·부하 저장, 식사는 미기록 유지');
+    ok((await page.textContent('#dyMsg')).includes('저장했어요'), '맥락 저장 확인');
+
+    // 경과시간 연결: 16:30–17:00 vs 07:30/08:30 → 8~9.5시간
+    await page.locator('#declineCharts > summary').click();
+    const title = await page.getAttribute('#elapsedChart .dseg', 'title');
+    ok(title === '8~9.5시간', `경과시간 범위 표시(평균으로 확정하지 않음): ${title}`);
+    ok((await page.textContent('#declineObs')).includes('아직 관찰 중이에요. 현재 비교 가능한 날은 1일'), '5일 미만 → 관찰 중');
+    ok((await page.textContent('#clockChart')).includes('추정 포함'), '추정은 색 말고 라벨로도 표시');
+
+    // 사후 추가 (복용 미기록 날)
+    await page.locator('#declineAddBox > summary').click();
+    const y = new Date(Date.now() - 864e5);
+    const ykey = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, '0')}-${String(y.getDate()).padStart(2, '0')}`;
+    await page.fill('#dfDate', ykey);
+    await page.fill('#dfFrom', '15:00');
+    await page.click('#declineForm button[type=submit]');
+    ok((await store(page)).declines.length === 2 && (await page.textContent('#dfMsg')).includes('저장했어요'), '지난 집중 저하 추가');
+    ok((await page.textContent('#elapsedChart')).includes('제외: 복용 미기록'), '복용 미기록 날은 경과시간 비교에서 제외로 표시');
+    // 수정
+    await page.locator('#declineList li', { hasText: '15:00' }).locator('[data-act="dedit"]').click();
+    await page.fill('#dfFrom', '15:30');
+    await page.click('#declineForm button[type=submit]');
+    st = await store(page);
+    ok(st.declines.length === 2 && st.declines.some((d) => new Date(d.onsetFrom).getMinutes() === 30 && new Date(d.onsetFrom).getHours() === 15), '사후 수정');
+    await shot(page, 'desktop-decline', true);
+
+    // 내보내기: 기본 포함, 해제하면 제외
+    await page.click('[data-tab="data"]');
+    const [a1] = await Promise.all([page.waitForEvent('download'), page.click('#exportJson')]);
+    ok(JSON.parse(fs.readFileSync(await a1.path(), 'utf8')).declines.length === 2, '백업에 민감 항목 포함(기본)');
+    await page.uncheck('#includeSensitive');
+    const [a2] = await Promise.all([page.waitForEvent('download'), page.click('#exportJson')]);
+    const lean = JSON.parse(fs.readFileSync(await a2.path(), 'utf8'));
+    ok(!('declines' in lean) && !('days' in lean) && lean.sensitiveExcluded === true, '체크 해제 시 복약·증상·맥락 제외');
+
+    // 예시 데이터와 섞이지 않음
+    await page.click('[data-tab="pattern"]');
+    await page.evaluate(() => { document.getElementById('sufficiencyCard').hidden = false; });
+    await page.click('#demoBtn');
+    ok(await page.isHidden('#declineCard'), '예시 미리보기 중엔 집중 저하 카드 숨김');
+    await page.click('#demoExit');
+    ok(await page.isVisible('#declineCard'), '미리보기 끄면 다시 표시');
+    await ctx.close();
+  }
+
+  // 5일 이상: 비교 문구 · 일정한 복용 시각
+  {
+    const { ctx, page } = await fresh();
+    await page.evaluate((d) => localStorage.setItem('focusTracker.v2', JSON.stringify(d)), seededUserData(Date.now()));
+    await page.reload();
+    await page.click('[data-tab="pattern"]');
+    const obs = await page.textContent('#declineObs');
+    ok(obs.includes('비교 가능한 6일 중 6일에 16~17시 집중 저하를 기록했어요'), `5일 이상 비교 문구 (${obs.slice(0, 60)}…)`);
+    ok(obs.includes('구분하기 어려워요'), '복용 시각이 비슷하면 두 축 구분 어려움 표시');
+    ok(!/복용량|복용 시각을 바꾸|진단|치료/.test(obs), '복약 조언·진단 문구 없음');
+    await page.locator('#declineCharts > summary').click();
+    ok(await page.locator('#clockChart .dband').count() > 0, '가장 많은 날이 겹친 1시간 표시');
+    await page.locator('#declineDayList details').first().locator('summary').click();
+    ok((await page.textContent('#declineDayList')).includes('수면 6시간'), '날짜별 맥락 펼쳐 보기');
+    await shot(page, 'desktop-decline-ready', true);
+    await ctx.close();
+  }
+
   // ───────── 데이터 탭: 내보내기 / 병합 / 전체 삭제 ─────────
   {
     const { ctx, page } = await fresh();
@@ -404,8 +532,13 @@ try {
     await m.click('#endBtn');
     await check('돌아보기');
     await shot(m, `${name}-review`, true);
-    for (const tab of ['later', 'pattern', 'data']) { await m.click(`[data-tab="${tab}"]`); await check(tab); }
-    const small = await m.evaluate(() => [...document.querySelectorAll('button, input, summary')].filter((b) => b.offsetParent && b.getBoundingClientRect().height < 32 && !b.classList.contains('link-btn') && !b.classList.contains('sr-only')).map((b) => b.id || b.textContent.trim().slice(0, 12)));
+    for (const tab of ['later', 'pattern', 'data']) {
+      await m.click(`[data-tab="${tab}"]`);
+      if (tab === 'pattern') for (const id of ['declineCharts', 'declineAddBox', 'dayBox']) await m.evaluate((x) => { document.getElementById(x).open = true; }, id);
+      await check(tab);
+      if (tab === 'pattern') await shot(m, `${name}-pattern`, true);
+    }
+    const small = await m.evaluate(() => [...document.querySelectorAll('button, input, summary')].map((b) => (b.type === 'checkbox' && b.closest('label') ? b.closest('label') : b)).filter((b) => b.offsetParent && b.getBoundingClientRect().height < 32 && !b.classList.contains('link-btn') && !b.classList.contains('sr-only')).map((b) => b.id || b.textContent.trim().slice(0, 12)));
     ok(small.length === 0, `${name} 터치 영역 ${JSON.stringify(small)}`);
     await m.click('[data-tab="now"]');
     await m.emulateMedia({ colorScheme: 'dark' });

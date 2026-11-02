@@ -359,6 +359,7 @@
     const id = lastEvent.id;
     draft = null;
     data.events = data.events.filter((e) => e.id !== id);
+    data.declines = (data.declines || []).filter((d) => d.eventId !== id);
     const ok = persist();
     lastEvent = null;
     showStatusMessage(ok ? '기록을 취소했어요' : '⚠ 기록을 취소했지만 저장하지 못했어요', false, 2500);
@@ -474,6 +475,7 @@
     if (!sheet.ev || !confirm('이 기록을 삭제할까요?')) return;
     const id = sheet.ev.id;
     data.events = data.events.filter((e) => e.id !== id);
+    data.declines = (data.declines || []).filter((d) => d.eventId !== id);
     persist();
     sheet.ev = null;
     closeSheet(false);
@@ -494,6 +496,7 @@
     $('dNote').value = ev.note;
     $('dKeep').checked = !!ev.keepForLater;
     delete $('dKeep').dataset.touched;
+    fillSheetDecline(ev);
     $('sheet').hidden = false;
     $('sheetBackdrop').hidden = false;
     $('sheetDone').focus();
@@ -685,6 +688,296 @@
     $(id).addEventListener('click', (e) => { if (e.target.dataset.act === 'unkeep' || e.target.dataset.act === 'edit') onLaterAction(e); });
   });
 
+  // ───────── 집중 저하 (선택 기록 · 민감 정보 · 원탭 흐름과 분리) ─────────
+  if (!Array.isArray(data.declines)) data.declines = [];
+  if (!data.days || typeof data.days !== 'object') data.days = {};
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const timeStr = (ts) => { const d = new Date(ts); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+  function tsFromLocal(dateStr, time) {
+    if (!dateStr || !time || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const [h, mi] = time.split(':').map(Number);
+    const t = new Date(y, m - 1, d, h, mi).getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  const nextDate = (dateStr) => { const [y, m, d] = dateStr.split('-').map(Number); return S.dateKey(new Date(y, m - 1, d + 1).getTime()); };
+  /** 날짜 + 시작/끝 시각 → [ms, ms]. 끝이 시작보다 이르면 자정을 넘은 것으로 본다 */
+  function onsetRange(dateStr, from, to) {
+    const a = tsFromLocal(dateStr, from);
+    if (a == null) return null;
+    let b = to ? tsFromLocal(dateStr, to) : a;
+    if (b != null && b < a) b = tsFromLocal(nextDate(dateStr), to);
+    return [a, b == null ? a : b];
+  }
+  const symptomChips = (sel) => S.SYMPTOM_META.map((x) => `<button type="button" class="chip${sel.includes(x.id) ? ' on' : ''}" data-sy="${x.id}" aria-pressed="${sel.includes(x.id)}">${esc(x.label)}</button>`).join('');
+  const toggleArr = (arr, v) => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
+  const declineOf = (eventId) => data.declines.find((d) => d.eventId === eventId) || null;
+  function newDecline(fields) {
+    const now = Date.now();
+    return { id: Store.uid('d'), eventId: null, onsetCertainty: 'sure', symptoms: [], note: '', tz: Store.currentTz(), tzOffsetMin: Store.offsetAt(fields.onsetFrom), recordedAt: now, createdAt: now, updatedAt: now, ...fields };
+  }
+  function upsertDecline(d) {
+    touch(d);
+    if (!data.declines.some((x) => x.id === d.id)) data.declines.push(d);
+    data.declines.sort((a, b) => a.onsetFrom - b.onsetFrom);
+    return persist();
+  }
+
+  // 상세 시트 안 "집중이 흐려졌어요" — 체크해야만 저장, 기본은 꺼짐
+  function fillSheetDecline(ev) {
+    const d = declineOf(ev.id);
+    $('dDecline').checked = !!d;
+    $('dDeclineMore').hidden = !d;
+    const custom = !!(d && (d.onsetFrom !== ev.ts || d.onsetTo !== ev.ts));
+    setPressed($('dOnsetMode'), 'om', d ? (custom ? 'custom' : 'now') : null);
+    $('dOnsetCustom').hidden = !custom;
+    $('dOnsetFrom').value = timeStr(d ? d.onsetFrom : ev.ts);
+    $('dOnsetTo').value = d && d.onsetTo !== d.onsetFrom ? timeStr(d.onsetTo) : '';
+    setPressed($('dCertainty'), 'ct', d ? d.onsetCertainty : null);
+    $('dSymptoms').innerHTML = symptomChips(d ? d.symptoms : []);
+  }
+  $('dDecline').addEventListener('change', () => {
+    if (!sheet.ev) return;
+    const ev = sheet.ev;
+    if ($('dDecline').checked) { if (!declineOf(ev.id)) upsertDecline(newDecline({ eventId: ev.id, onsetFrom: ev.ts, onsetTo: ev.ts })); }
+    else { data.declines = data.declines.filter((d) => d.eventId !== ev.id); persist(); }
+    fillSheetDecline(ev);
+  });
+  $('dOnsetMode').addEventListener('click', (e) => {
+    const c = e.target.closest('.chip');
+    const d = sheet.ev && declineOf(sheet.ev.id);
+    if (!c || !d) return;
+    if (c.dataset.om === 'now') { d.onsetFrom = sheet.ev.ts; d.onsetTo = sheet.ev.ts; upsertDecline(d); fillSheetDecline(sheet.ev); }
+    else { setPressed($('dOnsetMode'), 'om', 'custom'); $('dOnsetCustom').hidden = false; $('dOnsetFrom').focus(); }
+  });
+  function onSheetOnset() {
+    const d = sheet.ev && declineOf(sheet.ev.id);
+    if (!d) return;
+    const r = onsetRange(S.dateKey(sheet.ev.ts), $('dOnsetFrom').value, $('dOnsetTo').value);
+    if (!r) return;
+    [d.onsetFrom, d.onsetTo] = r;
+    upsertDecline(d);
+  }
+  $('dOnsetFrom').addEventListener('change', onSheetOnset);
+  $('dOnsetTo').addEventListener('change', onSheetOnset);
+  $('dCertainty').addEventListener('click', (e) => {
+    const c = e.target.closest('.chip');
+    const d = sheet.ev && declineOf(sheet.ev.id);
+    if (!c || !d) return;
+    d.onsetCertainty = c.dataset.ct;
+    setPressed($('dCertainty'), 'ct', d.onsetCertainty);
+    upsertDecline(d);
+  });
+  $('dSymptoms').addEventListener('click', (e) => {
+    const c = e.target.closest('.chip');
+    const d = sheet.ev && declineOf(sheet.ev.id);
+    if (!c || !d) return;
+    d.symptoms = toggleArr(d.symptoms, c.dataset.sy);
+    $('dSymptoms').innerHTML = symptomChips(d.symptoms);
+    upsertDecline(d);
+  });
+
+  // 지난 집중 저하 추가 · 수정 (사후 입력)
+  const df = { editing: null, symptoms: [], cert: 'sure' };
+  function resetDeclineForm(keepMsg) {
+    df.editing = null; df.symptoms = []; df.cert = 'sure';
+    $('dfDate').value = S.dateKey(Date.now());
+    ['dfFrom', 'dfTo', 'dfNote'].forEach((id) => { $(id).value = ''; });
+    setPressed($('dfCertainty'), 'ct', 'sure');
+    $('dfSymptoms').innerHTML = symptomChips([]);
+    $('dfSubmit').textContent = '저장';
+    if (!keepMsg) $('dfMsg').textContent = '';
+  }
+  $('dfCertainty').addEventListener('click', (e) => { const c = e.target.closest('.chip'); if (!c) return; df.cert = c.dataset.ct; setPressed($('dfCertainty'), 'ct', df.cert); });
+  $('dfSymptoms').addEventListener('click', (e) => { const c = e.target.closest('.chip'); if (!c) return; df.symptoms = toggleArr(df.symptoms, c.dataset.sy); $('dfSymptoms').innerHTML = symptomChips(df.symptoms); });
+  $('dfReset').addEventListener('click', () => resetDeclineForm());
+  $('declineForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const r = onsetRange($('dfDate').value, $('dfFrom').value, $('dfTo').value);
+    if (!r) { $('dfMsg').textContent = '날짜와 시각을 적어 주세요.'; $('dfMsg').classList.add('warn'); $('dfFrom').focus(); return; }
+    const d = (df.editing && data.declines.find((x) => x.id === df.editing)) || newDecline({ onsetFrom: r[0], onsetTo: r[1] });
+    Object.assign(d, { onsetFrom: r[0], onsetTo: r[1], onsetCertainty: df.cert, symptoms: df.symptoms, note: $('dfNote').value.trim() });
+    const ok = upsertDecline(d);
+    $('dfMsg').textContent = ok ? '저장했어요.' : '⚠ 저장하지 못했어요. 위 안내에서 백업할 수 있어요.';
+    $('dfMsg').classList.toggle('warn', !ok);
+    resetDeclineForm(true);
+    renderDecline();
+  });
+  $('declineList').addEventListener('click', (e) => {
+    const li = e.target.closest('li[data-id]');
+    const act = e.target.dataset.act;
+    if (!li || !act) return;
+    const d = data.declines.find((x) => x.id === li.dataset.id);
+    if (!d) return;
+    if (act === 'ddel') {
+      if (!confirm('이 집중 저하 기록을 삭제할까요?')) return;
+      data.declines = data.declines.filter((x) => x.id !== d.id);
+      persist();
+      renderDecline();
+    } else if (act === 'dedit') {
+      df.editing = d.id; df.symptoms = [...d.symptoms]; df.cert = d.onsetCertainty;
+      $('dfDate').value = S.dateKey(d.onsetFrom);
+      $('dfFrom').value = timeStr(d.onsetFrom);
+      $('dfTo').value = d.onsetTo !== d.onsetFrom ? timeStr(d.onsetTo) : '';
+      $('dfNote').value = d.note || '';
+      setPressed($('dfCertainty'), 'ct', df.cert);
+      $('dfSymptoms').innerHTML = symptomChips(df.symptoms);
+      $('dfSubmit').textContent = '수정 저장';
+      $('dfMsg').textContent = '';
+      $('dfFrom').focus();
+    }
+  });
+
+  // 하루 맥락 (복용·수면·식사·부하) — 모두 선택, 미기록 ≠ 복용 안 함
+  const dy = { dose: '', cert: 'sure', meal: '', load: '' };
+  function loadDayForm(dateStr) {
+    const x = data.days[dateStr];
+    dy.dose = (x && x.dose.status) || '';
+    dy.cert = x ? x.dose.certainty : 'sure';
+    dy.meal = x ? (x.meal.skipped === true ? 'skipped' : x.meal.skipped === false ? 'ate' : '') : '';
+    dy.load = (x && x.load) || '';
+    setPressed($('dyDose'), 'v', dy.dose);
+    setPressed($('dyCertainty'), 'ct', dy.cert);
+    setPressed($('dyMeal'), 'v', dy.meal);
+    setPressed($('dyLoad'), 'v', dy.load);
+    $('dyDoseMore').hidden = dy.dose !== 'taken';
+    const ts = x ? x.dose.times : [];
+    $('dyT1').value = ts[0] ? timeStr(ts[0]) : '';
+    $('dyT2').value = ts[1] ? timeStr(ts[1]) : '';
+    $('dyMultiple').checked = !!(x && x.dose.multiple);
+    $('dySleep').value = x && x.sleep.hours != null ? x.sleep.hours : '';
+    $('dySleepShort').checked = !!(x && x.sleep.short);
+    $('dyNote').value = (x && x.note) || '';
+    $('dyMsg').textContent = x ? '저장된 내용을 불러왔어요.' : '';
+    $('dyMsg').classList.remove('warn');
+  }
+  const chipPick = (boxId, key, after) => $(boxId).addEventListener('click', (e) => {
+    const c = e.target.closest('.chip');
+    if (!c) return;
+    dy[key] = c.dataset.v != null ? c.dataset.v : c.dataset.ct;
+    setPressed($(boxId), c.dataset.v != null ? 'v' : 'ct', dy[key]);
+    if (after) after();
+  });
+  chipPick('dyDose', 'dose', () => { $('dyDoseMore').hidden = dy.dose !== 'taken'; });
+  chipPick('dyCertainty', 'cert');
+  chipPick('dyMeal', 'meal');
+  chipPick('dyLoad', 'load');
+  $('dyDate').addEventListener('change', () => loadDayForm($('dyDate').value));
+  $('dayForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const date = $('dyDate').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { $('dyMsg').textContent = '날짜를 골라 주세요.'; return; }
+    const times = dy.dose === 'taken' ? [$('dyT1').value, $('dyT2').value].filter(Boolean).map((t) => tsFromLocal(date, t)).filter((t) => t != null) : [];
+    const sleepRaw = $('dySleep').value;
+    const day = Store.normDay({
+      dose: { status: dy.dose || null, times, certainty: times.length > 1 ? 'estimated' : dy.cert, multiple: dy.dose === 'taken' && $('dyMultiple').checked },
+      sleep: { hours: sleepRaw === '' ? null : Number(sleepRaw), short: $('dySleepShort').checked ? true : null },
+      meal: { skipped: dy.meal === 'skipped' ? true : dy.meal === 'ate' ? false : null, time: null },
+      load: dy.load || null,
+      note: $('dyNote').value.trim(),
+      tzOffsetMin: Store.offsetAt(tsFromLocal(date, '12:00')),
+      updatedAt: Date.now(),
+    });
+    data.days = { ...data.days, [date]: day };
+    const ok = persist();
+    $('dyMsg').textContent = ok ? `${date} 맥락을 저장했어요.` : '⚠ 저장하지 못했어요. 위 안내에서 백업할 수 있어요.';
+    $('dyMsg').classList.toggle('warn', !ok);
+    renderDecline();
+  });
+
+  function openPatternBox(id) {
+    switchTab('pattern');
+    const box = $(id);
+    box.open = true;
+    if (id === 'declineAddBox') { resetDeclineForm(); $('dfFrom').focus(); }
+    if (id === 'dayBox') { $('dyDate').value = S.dateKey(Date.now()); loadDayForm($('dyDate').value); $('dyDate').focus(); }
+    box.scrollIntoView({ block: 'start' });
+  }
+  $('reviewAddDecline').addEventListener('click', () => openPatternBox('declineAddBox'));
+  $('reviewAddDay').addEventListener('click', () => openPatternBox('dayBox'));
+
+  const LOAD_LABEL = { light: '가벼움', normal: '보통', high: '높음' };
+  function contextText(x) {
+    if (!x) return '맥락 미기록';
+    const dose = x.dose.status === 'taken'
+      ? `복용 ${x.dose.times.length ? x.dose.times.map(timeStr).join(' 또는 ') : '(시각 미기록)'}${x.dose.times.length > 1 || x.dose.certainty === 'estimated' ? '(추정)' : ''}${x.dose.multiple ? ' · 여러 번' : ''}`
+      : x.dose.status === 'not-taken' ? '복용 안 함' : '복용 미기록';
+    const sleep = x.sleep.hours != null ? `수면 ${x.sleep.hours}시간${x.sleep.short ? '(부족)' : ''}` : x.sleep.short ? '수면 부족' : '수면 미기록';
+    const meal = x.meal.skipped === true ? '식사 거름' : x.meal.skipped === false ? '식사함' : '식사 미기록';
+    const load = x.load ? `부하 ${LOAD_LABEL[x.load]}` : '부하 미기록';
+    return [dose, sleep, meal, load, x.note ? `메모: ${x.note}` : ''].filter(Boolean).join(' · ');
+  }
+
+  function chartHtml(rows, lo, hi, segsOf, tagOf, ticks, band) {
+    const pct = (v) => ((v - lo) / (hi - lo)) * 100;
+    const axis = `<div class="drow axis"><span class="dlabel"></span><span class="dtrack">${ticks.map((t) => `<i style="left:${pct(t.v)}%">${t.l}</i>`).join('')}</span><span class="dtag"></span></div>`;
+    const body = rows.map((r) => {
+      const segs = segsOf(r).map((g) => `<span class="dseg${g.est ? ' est' : ''}" style="left:${Math.max(0, pct(g.a))}%;width:${Math.max(1.5, pct(g.b) - pct(g.a))}%" title="${esc(g.title)}"></span>`).join('');
+      const b = band ? `<span class="dband" style="left:${pct(band[0])}%;width:${pct(band[1]) - pct(band[0])}%"></span>` : '';
+      return `<div class="drow"><span class="dlabel">${r.label}</span><span class="dtrack">${b}${segs}</span><span class="dtag">${tagOf(r)}</span></div>`;
+    }).join('');
+    return axis + body;
+  }
+
+  function renderDecline() {
+    $('declineCard').hidden = !!ui.demo; // 예시 데이터와 섞지 않음
+    if (ui.demo) return;
+    const a = S.declineAnalysis(data);
+    const o = a.observation;
+    $('declineObs').innerHTML = `<p class="fact">${esc(o.fact)}</p><p class="limit">${o.ready ? '<b>단, </b>' : ''}${esc(o.limit)}</p>${o.try ? `<p class="try"><b>해 볼 것 </b>${esc(o.try)}</p>` : ''}`;
+    const c = a.counts;
+    const ex = Object.entries(c.excluded).map(([k, n]) => `${S.LINK_LABELS[k]} ${n}일`).join(', ');
+    $('declineCounts').innerHTML = [
+      ['총 관찰 일수', `${c.observedDays}일 (기록 ${c.reports}개)`],
+      ['시각 비교 가능', `${c.clockDays}일`],
+      ['경과시간 비교 가능', `${c.elapsedDays}일`],
+      ['추정 입력이 있는 날', `${c.estimatedDays}일`],
+      ['경과시간 비교 제외', `${c.excludedDays}일${ex ? ` (${ex})` : ''}`],
+    ].map(([k, v]) => `<div><dt>${k}</dt><dd>${esc(v)}</dd></div>`).join('');
+
+    const rows = a.rows.slice(-14).map((r) => {
+      const [y, m, d] = r.key.split('-').map(Number);
+      return { ...r, label: `${m}/${d}(${S.WEEKDAYS[new Date(y, m - 1, d).getDay()]})` };
+    });
+    if (!rows.length) {
+      $('clockChart').innerHTML = '<p class="muted small">아직 집중 저하 기록이 없어요.</p>';
+      $('elapsedChart').innerHTML = '';
+      $('declineDayList').innerHTML = '';
+    } else {
+      const minFrom = Math.min(...rows.flatMap((r) => r.items.map((i) => i.from)));
+      const clo = minFrom < 6 * 60 ? 0 : 6 * 60;
+      const cticks = [];
+      for (let h = clo / 60; h <= 24; h += 3) cticks.push({ v: h * 60, l: `${h}` });
+      $('clockChart').innerHTML = chartHtml(rows, clo, 24 * 60,
+        (r) => r.items.map((i) => ({ a: i.from, b: i.to, est: i.estimated, title: `${Math.floor(i.from / 60)}:${pad2(Math.round(i.from % 60))}${i.estimated ? ' 추정' : ''}` })),
+        (r) => (r.estimatedClock ? '추정 포함' : ''), cticks, a.clockReady ? [a.clockBest.start, a.clockBest.end] : null);
+      const maxE = Math.max(16 * 60, ...rows.flatMap((r) => r.items.filter((i) => i.link.status === 'linked').map((i) => i.link.elapsedTo / S.MIN)));
+      const ehi = Math.ceil(maxE / 240) * 240;
+      const eticks = [];
+      for (let h = 0; h <= ehi / 60; h += 4) eticks.push({ v: h * 60, l: `${h}h` });
+      $('elapsedChart').innerHTML = chartHtml(rows, 0, ehi,
+        (r) => r.items.filter((i) => i.link.status === 'linked').map((i) => ({ a: i.link.elapsedFrom / S.MIN, b: i.link.elapsedTo / S.MIN, est: i.estimated || i.link.doseEstimated, title: `${S.fmtHours(i.link.elapsedFrom / S.MIN)}~${S.fmtHours(i.link.elapsedTo / S.MIN)}시간` })),
+        (r) => (r.linked ? (r.estimatedElapsed ? '추정 포함' : '') : `제외: ${S.LINK_LABELS[r.excludeReason]}`), eticks, a.elapsedReady ? [a.elapsedBest.start, a.elapsedBest.end] : null);
+      $('declineDayList').innerHTML = [...rows].reverse().map((r) => {
+        const times = r.items.map((i) => `${timeStr(new Date(r.key.replace(/-/g, '/')).getTime() + i.from * S.MIN)}${i.to > i.from ? '–' + timeStr(new Date(r.key.replace(/-/g, '/')).getTime() + i.to * S.MIN) : ''}${i.estimated ? '(추정)' : ''}`).join(', ');
+        const linked = r.items.filter((i) => i.link.status === 'linked');
+        const el = linked.length ? `복용 후 ${linked.map((i) => `${S.fmtHours(i.link.elapsedFrom / S.MIN)}~${S.fmtHours(i.link.elapsedTo / S.MIN)}시간`).join(', ')}` : S.LINK_LABELS[r.excludeReason];
+        const sym = [...new Set(r.items.flatMap((i) => i.symptoms))].map((id) => (S.SYMPTOM_META.find((x) => x.id === id) || {}).label).filter(Boolean).join(', ');
+        return `<li><details class="dday"><summary><b>${r.label}</b> ${esc(times)} · ${esc(el)}</summary><p class="muted small">${esc(contextText(r.context))}${sym ? ` · 느낀 것: ${esc(sym)}` : ''}</p></details></li>`;
+      }).join('');
+    }
+
+    const recent = [...data.declines].sort((p, q) => q.onsetFrom - p.onsetFrom).slice(0, 20);
+    $('declineList').innerHTML = recent.length ? recent.map((d) => {
+      const sym = d.symptoms.map((id) => (S.SYMPTOM_META.find((x) => x.id === id) || {}).label).filter(Boolean).join(', ');
+      return `<li data-id="${d.id}"><span class="txt">${mdhm(d.onsetFrom)}${d.onsetTo !== d.onsetFrom ? '–' + timeStr(d.onsetTo) : ''}${d.onsetCertainty === 'estimated' ? ' (추정)' : ''}${sym ? ` · ${esc(sym)}` : ''}${d.eventId ? ' · 아차 기록에서' : ''}</span>
+        <button type="button" class="btn sm ghost" data-act="dedit">수정</button><button type="button" class="icon-btn" data-act="ddel" aria-label="삭제">✕</button></li>`;
+    }).join('') : '<li class="empty">아직 없어요.</li>';
+  }
+  resetDeclineForm();
+  $('dyDate').value = S.dateKey(Date.now());
+  loadDayForm($('dyDate').value);
+
   // ───────── 렌더: 패턴 ─────────
   $('demoBtn').addEventListener('click', () => { ui.demo = S.generateDemoData(Date.now()); const n = new Date(); n.setDate(0); ui.viewYear = n.getFullYear(); ui.viewMonth = n.getMonth(); renderPattern(); });
   $('demoExit').addEventListener('click', () => { ui.demo = null; ui.viewYear = new Date().getFullYear(); ui.viewMonth = new Date().getMonth(); renderPattern(); });
@@ -708,6 +1001,7 @@
     <span class="track"><span class="fill" style="width:${max ? Math.round((value / max) * 100) : 0}%"></span></span><span class="n">${right}</span></div>`;
 
   function renderPattern() {
+    renderDecline();
     const src = ui.demo || data;
     const r = S.buildReport(src);
     const suf = r.sufficiency;
@@ -828,7 +1122,7 @@
     renderData();
   });
 
-  $('exportJson').addEventListener('click', backupNow);
+  $('exportJson').addEventListener('click', () => download(`focus-backup-${stamp()}.json`, Store.toJSON(data, { includeSensitive: $('includeSensitive').checked }), 'application/json'));
   $('exportCsv').addEventListener('click', () => download(`focus-log-${stamp()}.csv`, Store.toCSV(data), 'text/csv;charset=utf-8'));
 
   let pendingImport = null;

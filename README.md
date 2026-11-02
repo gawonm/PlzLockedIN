@@ -45,6 +45,16 @@ python -m http.server 8000
 - `맡겨둔 생각`, `자세한 기록·백업`은 접혀 있습니다. 자세한 통계는 기존 **패턴** 탭에 그대로 있습니다.
 - `다음 집중 시작하기` 또는 `오늘은 여기까지`로 끝냅니다. "오늘은 여기까지"는 종료 상태만 표시하고, 창을 닫지는 않습니다.
 
+## 집중이 흐려지는 시간 (선택 기록)
+오후 특정 시간에 집중이 흐려지는 것 같을 때, 부담 없이 여러 날을 비교해 볼 수 있는 기능입니다. 검토 결과는 [docs/FOCUS_DECLINE_REVIEW.md](docs/FOCUS_DECLINE_REVIEW.md)에 있습니다.
+- **기록할 때**: 아차! 뒤 `자세히` → `집중이 흐려졌어요`를 체크하고, 필요하면 시각 범위·확실/추정·느낀 것을 고릅니다. 기본은 꺼져 있고, 아차 기록을 자동으로 분류하지 않습니다.
+- **나중에**: 패턴 탭 → `지난 집중 저하 추가 · 수정`, `하루 맥락 적기`(복용 시각 후보 1~2개, 수면, 식사, 부하). 모두 선택이고, 적지 않은 항목은 "미기록"으로 남습니다(복용 안 함과 다름).
+- **보기**: 서로 다른 날이 5일 이상 모이면 발생 시각과 복용 후 경과시간을 날짜별로 나란히 보여 줍니다.
+  - 추정 시각은 범위로 표시합니다.
+  - 연결이 불명확한 날은 이유와 함께 제외합니다.
+  - 어느 쪽이 원인인지 판정하지 않고, 진단이나 복용 조언도 하지 않습니다.
+- 복약·증상 기록은 이 브라우저에만 저장됩니다. JSON 백업에서 제외하려면 데이터 탭의 체크를 해제하세요.
+
 ## 저장 안정성
 - **입력 중인 생각**은 입력 후 0.4초 뒤 자동 저장되고, 창을 숨기거나 닫을 때도 한 번 더 저장합니다. 제출 전에 새로고침해도 남습니다.
 - **저장에 실패하면** "기록했어요" 같은 성공 문구를 띄우지 않습니다. 화면 위 안내에서 바로 **JSON 백업**을 받을 수 있고(집중 중에도 가능), 저장하지 못한 입력은 지우지 않고 그대로 둡니다.
@@ -85,6 +95,8 @@ events:   { id, sessionId, ts, tz, tzOffsetMin, source: one-tap|migrated, taskTy
             thought, activity, trigger, returned: yes|no|unknown, note,
             keepForLater, laterDone, chainLink(예약), legacy?, createdAt, updatedAt }
 settings: { experiment: { id, text, chosenAt } | null }   ← 선택한 실험 (선택적 필드)
+declines: [{ id, eventId|null, onsetFrom, onsetTo, onsetCertainty, symptoms[], note, recordedAt, … }]   ← 선택
+days: { "YYYY-MM-DD": { dose{status,times[],certainty,multiple}, sleep, meal, load, note } }   ← 선택
 ```
 - 세션에도 선택적 필드 `experimentId`가 있습니다. 그 세션을 시작할 때 고른 실험의 ID입니다.
 - 이전 기록과의 간격은 저장하지 않고 계산합니다. 그래야 기록을 고치거나 지워도 값이 어긋나지 않습니다. CSV에는 `gap_from_prev_in_group_sec` 열로 들어갑니다.
