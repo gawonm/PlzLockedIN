@@ -1,5 +1,5 @@
 /* 오프라인 지원: 앱 셸 캐시 (네트워크 우선 → 실패 시 캐시) */
-const CACHE = 'focus-tracker-v2';
+const CACHE = 'focus-tracker-v3';
 const SHELL = ['./', './index.html', './styles.css', './js/stats.js', './js/store.js', './js/app.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', (e) => {

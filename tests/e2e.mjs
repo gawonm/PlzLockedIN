@@ -243,6 +243,35 @@ try {
   await shot(m, 'mobile-home-dark');
   await mob.close();
 
+  // ───────── 색 대비 (WCAG AA 4.5:1) — 라이트·다크 ─────────
+  for (const scheme of ['light', 'dark']) {
+    const cctx = await browser.newContext({ colorScheme: scheme });
+    const cp = await cctx.newPage();
+    watch(cp);
+    await cp.goto(URL_);
+    const pairs = await cp.evaluate(() => {
+      const rgb = (s) => s.match(/[\d.]+/g).slice(0, 3).map(Number);
+      const lum = ([r, g, b]) => {
+        const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+      };
+      const ratio = (a, b) => { const [x, y] = [lum(rgb(a)), lum(rgb(b))].sort((m, n) => n - m); return (x + 0.05) / (y + 0.05); };
+      const cs = (sel) => getComputedStyle(document.querySelector(sel));
+      const bodyBg = cs('body').backgroundColor;
+      const out = {
+        '아차 버튼 글자/배경': ratio(cs('.oops').color, cs('.oops').backgroundColor),
+        '본문 글자/배경': ratio(cs('body').color, bodyBg),
+        '보조 글자/배경': ratio(cs('.hint').color, bodyBg),
+      };
+      document.getElementById('oopsBtn').style.transition = 'none';
+      document.getElementById('oopsBtn').classList.add('done');
+      out['기록됨 상태 버튼'] = ratio(cs('.oops').color, cs('.oops').backgroundColor);
+      return out;
+    });
+    for (const [k, v] of Object.entries(pairs)) ok(v >= 4.5, `${scheme} 대비 ${k} ${v.toFixed(2)}:1`);
+    await cctx.close();
+  }
+
   ok(errors.length === 0, `JS 오류 없음 ${JSON.stringify(errors)}`);
 } catch (err) {
   console.error(err);
