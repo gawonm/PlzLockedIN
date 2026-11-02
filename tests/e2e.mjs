@@ -22,8 +22,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHOTS = process.env.SHOTS || '';
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
 
+let probe = 0;
 const server = http.createServer((req, res) => {
   const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  // 캐시 회귀 테스트용: 브라우저에 1시간 캐시하라고 지시하지만 내용은 매번 바뀜
+  if (p === '/__probe.txt') { res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'max-age=3600' }); res.end(String(++probe)); return; }
   const file = path.join(ROOT, p === '/' ? 'index.html' : p);
   if (!file.startsWith(ROOT) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
@@ -213,6 +216,10 @@ try {
   await op.evaluate(() => navigator.serviceWorker.ready);
   await op.reload();
   await op.evaluate(() => navigator.serviceWorker.ready);
+  // 회귀: 서버가 캐시를 허용해도 서비스 워커는 항상 새 파일을 받아야 함 (git pull 후 색이 안 바뀌던 문제)
+  ok(await op.evaluate(() => !!navigator.serviceWorker.controller), '서비스 워커가 페이지를 제어');
+  const [p1, p2] = await op.evaluate(async () => [await (await fetch('__probe.txt')).text(), await (await fetch('__probe.txt')).text()]);
+  ok(p1 !== p2, `업데이트된 파일을 브라우저 캐시 대신 새로 받음 (${p1} → ${p2})`);
   await octx.setOffline(true);
   await op.reload();
   ok(await op.locator('#oopsBtn').isVisible(), '오프라인에서 다시 열기');
