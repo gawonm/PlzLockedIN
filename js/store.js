@@ -25,7 +25,17 @@
   const RETURNED = ['yes', 'no', 'unknown'];
 
   function empty() {
-    return { schemaVersion: SCHEMA_VERSION, activeSessionId: null, sessions: [], events: [] };
+    return { schemaVersion: SCHEMA_VERSION, activeSessionId: null, sessions: [], events: [], settings: { experiment: null } };
+  }
+
+  /** 선택적 설정. 지금은 '다음 세션에서 해볼 실험' 하나만 둔다 */
+  function normSettings(raw) {
+    const out = { experiment: null };
+    const x = raw && raw.experiment;
+    if (x && typeof x.id === 'string' && x.id && typeof x.text === 'string') {
+      out.experiment = { id: x.id.slice(0, 80), text: x.text.slice(0, 200), chosenAt: Number.isFinite(x.chosenAt) ? x.chosenAt : null };
+    }
+    return out;
   }
 
   function uid(prefix) {
@@ -67,6 +77,7 @@
       task: str(fields.task, 80),
       location: str(fields.location, 120),
       nextAction: str(fields.nextAction, 120),
+      experimentId: fields.experimentId ? String(fields.experimentId).slice(0, 80) : null,
       startAt: now,
       endAt: null,
       endReason: null,
@@ -110,6 +121,7 @@
       task: str(s.task, 80),
       location: str(s.location, 120),
       nextAction: str(s.nextAction, 120),
+      experimentId: s.experimentId ? String(s.experimentId).slice(0, 80) : null,
       startAt: s.startAt,
       endAt,
       endReason: endAt == null ? null : oneOf(s.endReason, ['manual', 'stale-closed']) || 'manual',
@@ -228,6 +240,7 @@
     }
     const active = d.sessions.find((s) => s.id === raw.activeSessionId && s.endAt == null);
     d.activeSessionId = active ? active.id : null;
+    d.settings = normSettings(raw.settings);
     // 활성 세션이 아닌데 endAt이 없는 세션은 종료 시각을 알 수 없으므로 신뢰 불가로 닫음
     for (const s of d.sessions) {
       if (s.endAt == null && s.id !== d.activeSessionId) {
@@ -256,20 +269,51 @@
   }
 
   // ---------- 읽기 / 쓰기 ----------
+  const CORRUPT_PREFIX = 'focusTracker.corrupt.';
+
   /**
-   * @returns {{data, ok, migratedFromV1:boolean, error?}}
-   *  - v2가 있으면 v2만 읽는다(v1을 다시 마이그레이션하지 않음).
-   *  - v2가 없고 v1이 있으면 변환한다. v1 키는 그대로 둔다.
+   * 저장된 원문을 해석한다. 읽을 수 없으면 '빈 데이터'로 간주하지 않고 corrupt로 보고한다.
+   * @returns {{data, ok, migratedFromV1, dropped, corrupt?, unavailable?, error?}}
+   *  - corrupt: { key, raw, reason: 'parse'|'shape', blocksWrites }
+   *    blocksWrites=true(v2 손상)면 호출자는 사용자가 결정하기 전까지 v2 키에 쓰면 안 된다.
+   *  - v2가 있으면 v2만 읽는다(v1을 다시 마이그레이션하지 않음). v1 키는 지우지 않는다.
    */
   function load(storage) {
+    let v2;
+    let v1;
     try {
-      const v2 = storage.getItem(KEY);
-      if (v2) return { data: normalize(JSON.parse(v2)), ok: true, migratedFromV1: false };
-      const v1 = storage.getItem(KEY_V1);
-      if (v1) return { data: migrateV1(JSON.parse(v1)), ok: true, migratedFromV1: true };
-      return { data: empty(), ok: true, migratedFromV1: false };
+      v2 = storage.getItem(KEY);
+      v1 = v2 ? null : storage.getItem(KEY_V1);
     } catch (err) {
-      return { data: empty(), ok: false, migratedFromV1: false, error: err };
+      return { data: empty(), ok: false, unavailable: true, migratedFromV1: false, dropped: 0, error: err };
+    }
+    const text = v2 || v1;
+    const key = v2 ? KEY : KEY_V1;
+    if (!text) return { data: empty(), ok: true, migratedFromV1: false, dropped: 0 };
+    const corrupt = (reason, error) => ({
+      data: empty(), ok: false, migratedFromV1: false, dropped: 0, error,
+      corrupt: { key, raw: text, reason, blocksWrites: key === KEY },
+    });
+    let raw;
+    try {
+      raw = JSON.parse(text);
+    } catch (err) {
+      return corrupt('parse', err);
+    }
+    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.events) || !Array.isArray(raw.sessions)) return corrupt('shape');
+    const data = v2 ? normalize(raw) : migrateV1(raw);
+    const dropped = Math.max(0, raw.events.length - data.events.length) + Math.max(0, raw.sessions.length - data.sessions.length);
+    return { data, ok: true, migratedFromV1: !v2, dropped };
+  }
+
+  /** 손상(또는 일부 버려질) 원문을 별도 키에 보관. 실패하면 null */
+  function quarantine(storage, raw, now) {
+    const k = CORRUPT_PREFIX + (now != null ? now : Date.now());
+    try {
+      storage.setItem(k, raw);
+      return k;
+    } catch (err) {
+      return null;
     }
   }
 
@@ -327,7 +371,10 @@
     const s = pick(base.sessions, incoming.sessions);
     const e = pick(base.events, incoming.events);
     return {
-      data: { schemaVersion: SCHEMA_VERSION, activeSessionId: base.activeSessionId, sessions: s.list, events: e.list.sort((a, b) => a.ts - b.ts) },
+      data: {
+        schemaVersion: SCHEMA_VERSION, activeSessionId: base.activeSessionId, sessions: s.list, events: e.list.sort((a, b) => a.ts - b.ts),
+        settings: normSettings(base.settings),
+      },
       addedEvents: e.added, updatedEvents: e.updated, addedSessions: s.added,
     };
   }
@@ -390,6 +437,7 @@
         'endReason=stale-closed 세션은 종료 시각을 알 수 없어 시간당 비율 계산에서 제외된다.',
         'chainLink는 예약 필드이며 자동으로 확정하지 않는다.',
       ],
+      settings: data.settings || { experiment: null },
       sessions: data.sessions,
       events: data.events,
     }, null, 2);
@@ -398,7 +446,7 @@
   return {
     KEY, KEY_V1, SCHEMA_VERSION, STALE_SESSION_MS, TASK_TYPES, ACTIVITIES, TRIGGERS, RETURNED,
     empty, uid, currentTz, offsetAt, inferTaskType, newSession, newEvent,
-    normalize, migrateV1, isV1, closeStaleSessions, load, save, clearAll,
+    CORRUPT_PREFIX, normalize, normSettings, migrateV1, isV1, closeStaleSessions, load, quarantine, save, clearAll,
     parseImport, merge, localIso, toCSV, toJSON,
   };
 });

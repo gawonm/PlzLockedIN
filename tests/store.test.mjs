@@ -177,3 +177,59 @@ test('CSV: 이스케이프, 그룹 내 간격, 로컬 ISO 오프셋', () => {
   assert.match(Store.localIso(Date.UTC(2026, 0, 1, 0, 0), 540), /^2026-01-01T09:00:00\+09:00$/);
   assert.match(Store.localIso(Date.UTC(2026, 0, 1, 0, 0), -300), /^2025-12-31T19:00:00-05:00$/);
 });
+
+// ───────── 저장 안정성 (디자인 인수인계 §5) ─────────
+test('손상 데이터: 파싱 오류 시 corrupt로 보고하고 원본을 돌려줌(빈 상태로 간주하지 않음)', () => {
+  const st = memStorage({ 'focusTracker.v2': '{"events":[{"id":"a"' });
+  const r = Store.load(st);
+  assert.equal(r.ok, false);
+  assert.ok(r.corrupt);
+  assert.equal(r.corrupt.key, 'focusTracker.v2');
+  assert.equal(r.corrupt.raw, '{"events":[{"id":"a"');
+  assert.equal(r.corrupt.blocksWrites, true);
+  assert.equal(st.getItem('focusTracker.v2'), '{"events":[{"id":"a"', 'load가 원본을 바꾸지 않음');
+});
+
+test('손상 데이터: JSON은 맞지만 형식이 다르면 corrupt', () => {
+  const r = Store.load(memStorage({ 'focusTracker.v2': '{"hello":1}' }));
+  assert.ok(r.corrupt);
+  assert.equal(r.corrupt.reason, 'shape');
+});
+
+test('손상 v1은 v2 쓰기를 막지 않지만 원본은 보고함', () => {
+  const r = Store.load(memStorage({ 'focusTracker.v1': 'not json' }));
+  assert.ok(r.corrupt);
+  assert.equal(r.corrupt.key, 'focusTracker.v1');
+  assert.equal(r.corrupt.blocksWrites, false);
+});
+
+test('quarantine: 손상 원본을 별도 키에 보관', () => {
+  const st = memStorage({ 'focusTracker.v2': '{broken' });
+  const k = Store.quarantine(st, '{broken', 1234);
+  assert.equal(k, 'focusTracker.corrupt.1234');
+  assert.equal(st.getItem(k), '{broken');
+  assert.equal(st.getItem('focusTracker.v2'), '{broken');
+});
+
+test('일부 항목이 잘못된 경우 dropped 개수를 알려 줌', () => {
+  const raw = { schemaVersion: 2, sessions: [], events: [{ id: 'a', ts: 1 }, { id: 'b' }, { nope: 1 }] };
+  const r = Store.load(memStorage({ 'focusTracker.v2': JSON.stringify(raw) }));
+  assert.equal(r.ok, true);
+  assert.equal(r.data.events.length, 1);
+  assert.equal(r.dropped, 2);
+});
+
+test('설정(선택한 실험)과 세션 experimentId 보존, 병합 시 기존 설정 유지', () => {
+  const d = Store.normalize({
+    schemaVersion: 2, sessions: [{ id: 's', startAt: 1, endAt: 2, endReason: 'manual', experimentId: 'top-activity:search' }], events: [],
+    settings: { experiment: { id: 'top-activity:search', text: '검색어 맡기기', chosenAt: 5 } },
+  });
+  assert.equal(d.sessions[0].experimentId, 'top-activity:search');
+  assert.deepEqual(d.settings.experiment, { id: 'top-activity:search', text: '검색어 맡기기', chosenAt: 5 });
+  const back = Store.parseImport(Store.toJSON(d)).data;
+  assert.deepEqual(back.settings, d.settings);
+  const m = Store.merge(d, Store.empty()).data;
+  assert.deepEqual(m.settings, d.settings);
+  assert.deepEqual(Store.empty().settings, { experiment: null });
+  assert.equal(Store.normalize({ schemaVersion: 2, sessions: [], events: [], settings: { experiment: { id: 5 } } }).settings.experiment, null);
+});

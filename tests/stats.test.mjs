@@ -156,3 +156,41 @@ test('generateDemoData: 결정적(seed 고정), v2 형식', () => {
   assert.deepEqual(a, S.generateDemoData(now));
   assert.equal(a.schemaVersion, 2);
 });
+
+test('pickInsight: 하나만, 실천 가능한 것 우선, 근거 부족하면 null', () => {
+  assert.equal(S.pickInsight(S.buildReport(caseB())), null);
+  const demo = S.generateDemoData(at(2026, 10, 2, 12), 28);
+  const r = S.buildReport(demo, at(2026, 10, 2, 12));
+  const one = S.pickInsight(r);
+  assert.ok(one);
+  const order = ['top-activity', 'top-trigger', 'short-gaps', 'next-action', 'hour-rate', 'task-type', 'hour-count'];
+  const best = Math.min(...r.insights.map((i) => order.indexOf(i.id)));
+  assert.equal(one.id, order[best]);
+});
+
+test('모든 인사이트에 다음 세션용 실험(id·짧은 문구)이 있음', () => {
+  const demo = S.generateDemoData(at(2026, 10, 2, 12), 28);
+  for (const i of S.buildReport(demo, at(2026, 10, 2, 12)).insights) {
+    assert.ok(i.experiment && i.experiment.id && i.experiment.text, i.id);
+    assert.ok(i.experiment.text.length <= 40, `${i.id}: ${i.experiment.text}`);
+  }
+});
+
+test('top-activity 사실은 실제 횟수로 표현하고 원인 단정 없음', () => {
+  const events = [];
+  for (let i = 0; i < 10; i++) events.push(ev(`e${i}`, null, at(2026, 10, 1 + (i % 4), 10, i), { activity: i < 6 ? 'search' : 'messenger' }));
+  for (let i = 10; i < 16; i++) events.push(ev(`e${i}`, null, at(2026, 10, 2, 15, i)));
+  const r = S.buildReport({ sessions: [], events });
+  const i = r.insights.find((x) => x.id === 'top-activity');
+  assert.ok(i);
+  assert.match(i.fact, /"검색"\(이\)라고 남긴 기록이 6번/);
+  assert.match(i.limit, /원인을 알 수는 없/);
+  assert.equal(i.experiment.id, 'top-activity:search');
+});
+
+test('recentDays: 기록 없는 날도 포함(0), 월 경계', () => {
+  const evs = [ev('a', null, at(2026, 10, 1, 9)), ev('b', null, at(2026, 10, 1, 10)), ev('c', null, at(2026, 9, 31, 9))];
+  const d = S.recentDays(evs, at(2026, 10, 2, 12), 7);
+  assert.equal(d.length, 7);
+  assert.deepEqual(d.slice(-3).map((x) => [x.month, x.day, x.count]), [[10, 31, 1], [11, 1, 2], [11, 2, 0]]);
+});
