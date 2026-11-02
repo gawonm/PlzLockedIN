@@ -3,7 +3,7 @@
  * 네트워크 요청은 cache:'no-cache'로 보내 브라우저 HTTP 캐시에 묵은 파일이 있어도 항상 서버에 확인한다.
  * (python http.server는 Cache-Control을 주지 않아 브라우저가 옛 CSS/JS를 계속 쓰는 문제가 있었음)
  */
-const CACHE = 'focus-tracker-v4';
+const CACHE = 'focus-tracker-v5';
 const SHELL = ['./', './index.html', './styles.css', './js/stats.js', './js/store.js', './js/app.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', (e) => {
