@@ -18,9 +18,10 @@ try {
   process.exit(2);
 }
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// SITE_DIR로 배포용 묶음(_site)을 지정하면 실제 배포될 파일만으로 검사한다
+const ROOT = path.resolve(process.env.SITE_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const SHOTS = process.env.SHOTS || '';
-const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json', '.png': 'image/png' };
 
 let probe = 0;
 const server = http.createServer((req, res) => {
@@ -67,7 +68,16 @@ function seededUserData(now) {
       events.push({ id: `seed-e${d}-${k}`, sessionId: sid, ts, source: 'one-tap', taskType: 'class', thought: '', activity: k < 3 ? 'search' : 'messenger', trigger: null, returned: 'unknown', note: '', keepForLater: false, laterDone: false, chainLink: null, createdAt: ts, updatedAt: ts });
     }
   }
-  return { schemaVersion: 2, activeSessionId: null, sessions, events, settings: { experiment: null } };
+  const declines = [];
+  const days = {};
+  for (let d = 6; d >= 1; d--) {
+    const base = new Date(now - d * DAY);
+    const at = (h, m) => new Date(base.getFullYear(), base.getMonth(), base.getDate(), h, m).getTime();
+    const key = `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-${String(base.getDate()).padStart(2, '0')}`;
+    days[key] = { dose: { status: 'taken', times: d % 2 ? [at(7, 30), at(8, 30)] : [at(8, 0)], certainty: d % 2 ? 'estimated' : 'sure' }, sleep: { hours: 6 }, load: 'high' };
+    declines.push({ id: `seed-d${d}`, onsetFrom: at(16, 30), onsetTo: at(17, 0), onsetCertainty: d % 2 ? 'estimated' : 'sure', symptoms: ['sleepy'] });
+  }
+  return { schemaVersion: 2, activeSessionId: null, sessions, events, settings: { experiment: null }, declines, days };
 }
 
 try {
@@ -208,6 +218,66 @@ try {
     await ctx.close();
   }
 
+  // ───────── v3 UI: 대시보드 · 테마 ─────────
+  {
+    const { ctx, page } = await fresh();
+    await page.evaluate((d) => localStorage.setItem('focusTracker.v2', JSON.stringify(d)), seededUserData(Date.now()));
+    await page.reload();
+    ok(await page.isVisible('#dashboard') && !(await page.locator('#homeGrid').evaluate((e) => e.classList.contains('solo'))), '시작 화면: 왼쪽 패널 + 오른쪽 대시보드');
+    ok((await page.textContent('#stRec')) === '24개' || /개$/.test(await page.textContent('#stRec')), `이번 달 기록 수 표시 (${await page.textContent('#stRec')})`);
+    const dash = await page.textContent('#dashboard');
+    ok(!/스트릭|연속|streak|점수|놓친 날|Missed/i.test(dash), '대시보드에 스트릭·점수·놓친 날 없음');
+    const cells = await page.locator('#ghMap .gh-cells i').count();
+    ok(cells >= 365 && cells <= 371, `최근 1년 히트맵 칸 ${cells}개`);
+    ok((await page.locator('#ghMap .gh-cells i[title$="미기록"]').count()) > 300, '기록 없는 날은 "미기록"');
+    ok(await page.locator('#ghMap .gh-cells i.today').count() === 1, '오늘 표시');
+    const acts = await page.locator('#activity li').count();
+    ok(acts > 0 && acts <= 6, `최근 활동 ${acts}개`);
+    await page.click('.stat-link');
+    ok(await page.isVisible('#tab-later'), '맡겨둔 생각 카드 → 보관함');
+    await page.click('[data-tab="now"]');
+    await shot(page, 'v3-desktop-start', true);
+    // 집중 중: 대시보드 없음, 한 열
+    await page.fill('#nextActionInput', '대시보드 숨김 확인');
+    await page.click('#startForm button[type=submit]');
+    ok(await page.isHidden('#dashboard') && await page.locator('#homeGrid').evaluate((e) => e.classList.contains('solo')), '집중 중엔 대시보드 숨김');
+    const r = await page.locator('#oopsBtn').boundingBox();
+    ok(Math.abs(r.width - r.height) < 2, '아차 버튼은 동그라미(카운트다운 아님)');
+    await page.click('#endBtn');
+    ok(await page.isHidden('#dashboard'), '돌아보기에도 대시보드 없음');
+    await page.click('#nextFocusBtn');
+    ok((await page.textContent('#activity')).includes('대시보드 숨김 확인'), '마친 세션이 최근 활동에 표시');
+
+    // 테마: 시스템 → 라이트 → 다크 → 시스템, 새로고침 후 유지
+    const bg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    ok((await page.getAttribute('html', 'data-theme')) === null, '기본은 시스템 설정');
+    await page.click('#themeBtn');
+    ok((await page.getAttribute('html', 'data-theme')) === 'light' && (await bg()) === 'rgb(248, 245, 244)', '라이트');
+    await page.click('#themeBtn');
+    ok((await page.getAttribute('html', 'data-theme')) === 'dark' && (await bg()) === 'rgb(18, 17, 28)', '다크(남색 바탕)');
+    ok((await page.getAttribute('meta[name="theme-color"]', 'content')) === '#12111c', '다크일 때 상단 바 색');
+    await page.reload();
+    ok((await page.getAttribute('html', 'data-theme')) === 'dark', '새로고침 후 테마 유지');
+    ok((await page.getAttribute('#themeBtn', 'aria-label')).includes('다크'), '테마 버튼 접근성 이름');
+    const darkPairs = await page.evaluate(() => {
+      const rgb = (s) => s.match(/[\d.]+/g).slice(0, 3).map(Number);
+      const lum = ([r, g, b]) => { const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+      const ratio = (a, b) => { const [x, y] = [lum(rgb(a)), lum(rgb(b))].sort((m, n) => n - m); return (x + 0.05) / (y + 0.05); };
+      const cs = (sel) => getComputedStyle(document.querySelector(sel));
+      return {
+        '주 버튼': ratio(cs('#startForm .btn.primary').color, cs('#startForm .btn.primary').backgroundColor),
+        '카드 보조 글자': ratio(cs('.stat-s').color, cs('.stat').backgroundColor),
+        '활동 보조 글자': ratio(cs('.tl-sub').color, cs('.dash-card').backgroundColor),
+        '탭 글자': ratio(cs('.tab:not(.active)').color, cs('body').backgroundColor),
+      };
+    });
+    for (const [k, v] of Object.entries(darkPairs)) ok(v >= 4.5, `다크 대비 ${k} ${v.toFixed(2)}:1`);
+    await shot(page, 'v3-desktop-start-dark', true);
+    await page.click('#themeBtn');
+    ok((await page.getAttribute('html', 'data-theme')) === null, '다시 시스템 설정');
+    await ctx.close();
+  }
+
   // ───────── 돌아보기: 관찰 하나 · 실험 하나 · 다음 세션에 유지 ─────────
   {
     const { ctx, page } = await fresh();
@@ -319,6 +389,125 @@ try {
     await ctx.close();
   }
 
+  // ───────── 집중 저하 시간 패턴 (선택 기록) ─────────
+  {
+    const { ctx, page } = await fresh();
+    page.on('dialog', (d) => d.accept());
+    await page.fill('#nextActionInput', '오후 수업');
+    await page.click('#startForm button[type=submit]');
+    // 원탭은 그대로: 버튼 한 번 = 아차 기록 하나, 집중 저하 보고는 생기지 않음
+    await page.click('#oopsBtn');
+    let st = await store(page);
+    ok(st.events.length === 1 && (st.declines || []).length === 0, '원탭 기록은 집중 저하로 자동 분류하지 않음');
+    await page.click('#detailBtn');
+    ok(!(await page.isChecked('#dDecline')) && await page.isHidden('#dDeclineMore'), '상세 시트의 "집중이 흐려졌어요"는 기본 꺼짐');
+    await page.check('#dDecline');
+    st = await store(page);
+    ok(st.declines.length === 1 && st.declines[0].eventId === st.events[0].id && st.declines[0].onsetFrom === st.events[0].ts, '체크하면 기록 시각 기준 보고 생성');
+    await page.click('[data-om="custom"]');
+    await page.fill('#dOnsetFrom', '16:30');
+    await page.fill('#dOnsetTo', '17:00');
+    await page.dispatchEvent('#dOnsetTo', 'change');
+    await page.click('#dCertainty [data-ct="estimated"]');
+    await page.click('#dSymptoms [data-sy="sleepy"]');
+    st = await store(page);
+    const dd = st.declines[0];
+    const t = new Date(dd.onsetFrom);
+    ok(t.getHours() === 16 && t.getMinutes() === 30 && (dd.onsetTo - dd.onsetFrom) === 30 * 60e3, '사후 시각 범위(16:30–17:00) 저장, 기록 시각과 별도');
+    ok(dd.onsetCertainty === 'estimated' && dd.symptoms.join() === 'sleepy' && dd.recordedAt >= st.events[0].ts, '추정·증상·입력 시각 보존');
+    await page.uncheck('#dDecline');
+    ok((await store(page)).declines.length === 0, '체크 해제하면 보고 삭제');
+    await page.check('#dDecline');
+    ok(new Date((await store(page)).declines[0].onsetFrom).getMinutes() === new Date((await store(page)).events[0].ts).getMinutes(), '다시 체크하면 기록 시각 기준 새 보고');
+    await page.click('[data-om="custom"]');
+    await page.fill('#dOnsetFrom', '16:30');
+    await page.fill('#dOnsetTo', '17:00');
+    await page.dispatchEvent('#dOnsetTo', 'change');
+    await page.click('#dCertainty [data-ct="estimated"]');
+    await page.click('#sheetDone');
+    await page.waitForTimeout(900);
+    await page.click('#oopsBtn');
+    await page.click('#undoBtn');
+    ok((await store(page)).declines.length === 1, '다른 기록 되돌리기는 다른 보고에 영향 없음');
+    await page.click('#endBtn');
+
+    // 돌아보기 → 하루 맥락 적기 (제안서 사례: 07:30 또는 08:30 복용, 추정)
+    await page.click('#reviewAddDay');
+    ok(await page.isVisible('#dayForm') && (await page.locator('#dyDose .chip.on').textContent()) === '미기록', '맥락 기본값은 미기록');
+    await page.click('#dyDose [data-v="taken"]');
+    await page.fill('#dyT1', '07:30');
+    await page.fill('#dyT2', '08:30');
+    await page.fill('#dySleep', '5.5');
+    await page.click('#dyLoad [data-v="high"]');
+    await page.click('#dayForm button[type=submit]');
+    st = await store(page);
+    const today = Object.keys(st.days)[0];
+    const day = st.days[today];
+    ok(day.dose.status === 'taken' && day.dose.times.length === 2 && day.dose.certainty === 'estimated', '복용 후보 시각 두 개 → 추정으로 저장');
+    ok(day.sleep.hours === 5.5 && day.load === 'high' && day.meal.skipped === null, '수면·부하 저장, 식사는 미기록 유지');
+    ok((await page.textContent('#dyMsg')).includes('저장했어요'), '맥락 저장 확인');
+
+    // 경과시간 연결: 16:30–17:00 vs 07:30/08:30 → 8~9.5시간
+    await page.locator('#declineCharts > summary').click();
+    const title = await page.getAttribute('#elapsedChart .dseg', 'title');
+    ok(title === '8~9.5시간', `경과시간 범위 표시(평균으로 확정하지 않음): ${title}`);
+    ok((await page.textContent('#declineObs')).includes('아직 관찰 중이에요. 현재 비교 가능한 날은 1일'), '5일 미만 → 관찰 중');
+    ok((await page.textContent('#clockChart')).includes('추정 포함'), '추정은 색 말고 라벨로도 표시');
+
+    // 사후 추가 (복용 미기록 날)
+    await page.locator('#declineAddBox > summary').click();
+    const y = new Date(Date.now() - 864e5);
+    const ykey = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, '0')}-${String(y.getDate()).padStart(2, '0')}`;
+    await page.fill('#dfDate', ykey);
+    await page.fill('#dfFrom', '15:00');
+    await page.click('#declineForm button[type=submit]');
+    ok((await store(page)).declines.length === 2 && (await page.textContent('#dfMsg')).includes('저장했어요'), '지난 집중 저하 추가');
+    ok((await page.textContent('#elapsedChart')).includes('제외: 복용 미기록'), '복용 미기록 날은 경과시간 비교에서 제외로 표시');
+    // 수정
+    await page.locator('#declineList li', { hasText: '15:00' }).locator('[data-act="dedit"]').click();
+    await page.fill('#dfFrom', '15:30');
+    await page.click('#declineForm button[type=submit]');
+    st = await store(page);
+    ok(st.declines.length === 2 && st.declines.some((d) => new Date(d.onsetFrom).getMinutes() === 30 && new Date(d.onsetFrom).getHours() === 15), '사후 수정');
+    await shot(page, 'desktop-decline', true);
+
+    // 내보내기: 기본 포함, 해제하면 제외
+    await page.click('[data-tab="data"]');
+    const [a1] = await Promise.all([page.waitForEvent('download'), page.click('#exportJson')]);
+    ok(JSON.parse(fs.readFileSync(await a1.path(), 'utf8')).declines.length === 2, '백업에 민감 항목 포함(기본)');
+    await page.uncheck('#includeSensitive');
+    const [a2] = await Promise.all([page.waitForEvent('download'), page.click('#exportJson')]);
+    const lean = JSON.parse(fs.readFileSync(await a2.path(), 'utf8'));
+    ok(!('declines' in lean) && !('days' in lean) && lean.sensitiveExcluded === true, '체크 해제 시 복약·증상·맥락 제외');
+
+    // 예시 데이터와 섞이지 않음
+    await page.click('[data-tab="pattern"]');
+    await page.evaluate(() => { document.getElementById('sufficiencyCard').hidden = false; });
+    await page.click('#demoBtn');
+    ok(await page.isHidden('#declineCard'), '예시 미리보기 중엔 집중 저하 카드 숨김');
+    await page.click('#demoExit');
+    ok(await page.isVisible('#declineCard'), '미리보기 끄면 다시 표시');
+    await ctx.close();
+  }
+
+  // 5일 이상: 비교 문구 · 일정한 복용 시각
+  {
+    const { ctx, page } = await fresh();
+    await page.evaluate((d) => localStorage.setItem('focusTracker.v2', JSON.stringify(d)), seededUserData(Date.now()));
+    await page.reload();
+    await page.click('[data-tab="pattern"]');
+    const obs = await page.textContent('#declineObs');
+    ok(obs.includes('비교 가능한 6일 중 6일에 16~17시 집중 저하를 기록했어요'), `5일 이상 비교 문구 (${obs.slice(0, 60)}…)`);
+    ok(obs.includes('구분하기 어려워요'), '복용 시각이 비슷하면 두 축 구분 어려움 표시');
+    ok(!/복용량|복용 시각을 바꾸|진단|치료/.test(obs), '복약 조언·진단 문구 없음');
+    await page.locator('#declineCharts > summary').click();
+    ok(await page.locator('#clockChart .dband').count() > 0, '가장 많은 날이 겹친 1시간 표시');
+    await page.locator('#declineDayList details').first().locator('summary').click();
+    ok((await page.textContent('#declineDayList')).includes('수면 6시간'), '날짜별 맥락 펼쳐 보기');
+    await shot(page, 'desktop-decline-ready', true);
+    await ctx.close();
+  }
+
   // ───────── 데이터 탭: 내보내기 / 병합 / 전체 삭제 ─────────
   {
     const { ctx, page } = await fresh();
@@ -380,6 +569,57 @@ try {
     await ctx.close();
   }
 
+  // ───────── 앱으로 설치 (PWA) ─────────
+  {
+    const { ctx, page } = await fresh();
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.reload();
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    const cdp = await ctx.newCDPSession(page);
+    const inst = await cdp.send('Page.getInstallabilityErrors');
+    ok(inst.installabilityErrors.length === 0, `Chrome 설치 조건 충족 ${JSON.stringify(inst.installabilityErrors)}`);
+    const man = await cdp.send('Page.getAppManifest');
+    const mj = JSON.parse(man.data);
+    ok(man.errors.length === 0 && mj.short_name === 'PlzLockedIN' && mj.display === 'standalone', `매니페스트 오류 없음 ${JSON.stringify(man.errors)}`);
+    for (const ic of mj.icons.filter((i) => i.type === 'image/png')) {
+      const dim = await page.evaluate(async (src) => { const im = new Image(); im.src = src; await im.decode(); return `${im.naturalWidth}x${im.naturalHeight}`; }, ic.src);
+      ok(dim === ic.sizes, `아이콘 ${ic.src} 실제 크기 ${dim}`);
+    }
+    ok(mj.icons.some((i) => i.purpose === 'maskable'), '마스커블 아이콘');
+    ok(await page.evaluate(async () => { const c = await caches.keys(); const k = c.find((x) => x.startsWith('focus-tracker')); const cache = await caches.open(k); return !!(await cache.match('./icons/icon-192.png')); }), '아이콘도 오프라인 캐시');
+
+    // 설치 버튼: 브라우저가 설치를 제안할 때만, 집중 중엔 숨김
+    ok(await page.isHidden('#installBtn'), '설치 제안 전엔 버튼 숨김');
+    await page.evaluate(() => {
+      const e = new Event('beforeinstallprompt', { cancelable: true });
+      e.prompt = () => { window.__prompted = true; return Promise.resolve(); };
+      e.userChoice = Promise.resolve({ outcome: 'accepted' });
+      window.dispatchEvent(e);
+    });
+    ok(await page.isVisible('#installBtn'), '설치 제안 시 헤더에 "앱 설치"');
+    await page.fill('#nextActionInput', '설치 버튼 확인');
+    await page.click('#startForm button[type=submit]');
+    ok(await page.isHidden('#installBtn'), '집중 중엔 설치 버튼도 숨김');
+    await page.click('#endBtn');
+    ok(await page.isVisible('#installBtn'), '집중을 마치면 다시 표시');
+    await page.click('[data-tab="data"]');
+    ok(await page.isVisible('#installBtnData') && (await page.textContent('#installStatus')).includes('설치돼요'), '데이터 탭 설치 안내');
+    await page.click('#installBtnData');
+    ok(await page.evaluate(() => window.__prompted === true) && await page.isHidden('#installBtn'), '버튼을 누르면 브라우저 설치 창 호출');
+    await shot(page, 'desktop-install');
+    await ctx.close();
+
+    // iPhone Safari: 설치 창 API가 없으므로 안내 문구
+    const ios = await browser.newContext({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1', viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    const ip = await ios.newPage();
+    watch(ip);
+    await ip.goto(URL_);
+    await ip.tap('[data-tab="data"]');
+    ok((await ip.textContent('#installStatus')).includes('홈 화면에 추가'), 'iPhone에선 "홈 화면에 추가" 안내');
+    await shot(ip, 'ios-install');
+    await ios.close();
+  }
+
   // ───────── 반응형: 375px 모바일 / 작은 데스크톱 창 / 다크 모드 ─────────
   for (const [name, vp, mobile] of [['mobile', { width: 375, height: 812 }, true], ['small-window', { width: 520, height: 640 }, false]]) {
     const ctx = await browser.newContext({ viewport: vp, isMobile: mobile, hasTouch: mobile });
@@ -404,8 +644,13 @@ try {
     await m.click('#endBtn');
     await check('돌아보기');
     await shot(m, `${name}-review`, true);
-    for (const tab of ['later', 'pattern', 'data']) { await m.click(`[data-tab="${tab}"]`); await check(tab); }
-    const small = await m.evaluate(() => [...document.querySelectorAll('button, input, summary')].filter((b) => b.offsetParent && b.getBoundingClientRect().height < 32 && !b.classList.contains('link-btn') && !b.classList.contains('sr-only')).map((b) => b.id || b.textContent.trim().slice(0, 12)));
+    for (const tab of ['later', 'pattern', 'data']) {
+      await m.click(`[data-tab="${tab}"]`);
+      if (tab === 'pattern') for (const id of ['declineCharts', 'declineAddBox', 'dayBox']) await m.evaluate((x) => { document.getElementById(x).open = true; }, id);
+      await check(tab);
+      if (tab === 'pattern') await shot(m, `${name}-pattern`, true);
+    }
+    const small = await m.evaluate(() => [...document.querySelectorAll('button, input, summary')].map((b) => (b.type === 'checkbox' && b.closest('label') ? b.closest('label') : b)).filter((b) => b.offsetParent && b.getBoundingClientRect().height < 32 && !b.classList.contains('link-btn') && !b.classList.contains('sr-only')).map((b) => b.id || b.textContent.trim().slice(0, 12)));
     ok(small.length === 0, `${name} 터치 영역 ${JSON.stringify(small)}`);
     await m.click('[data-tab="now"]');
     await m.emulateMedia({ colorScheme: 'dark' });

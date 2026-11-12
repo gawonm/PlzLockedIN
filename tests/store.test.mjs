@@ -233,3 +233,66 @@ test('설정(선택한 실험)과 세션 experimentId 보존, 병합 시 기존 
   assert.deepEqual(Store.empty().settings, { experiment: null });
   assert.equal(Store.normalize({ schemaVersion: 2, sessions: [], events: [], settings: { experiment: { id: 5 } } }).settings.experiment, null);
 });
+
+// ───────── 집중 저하·하루 맥락 (FOCUS_DECLINE_PATTERN_PROPOSAL) ─────────
+test('집중 저하·하루 맥락: 선택 필드 정규화(검증·불확실성·미기록 구분)', () => {
+  const d = Store.normalize({
+    schemaVersion: 2, sessions: [], events: [],
+    declines: [
+      { id: 'd1', eventId: 'e1', onsetFrom: at(2026, 10, 2, 17), onsetTo: at(2026, 10, 2, 16, 30), onsetCertainty: 'estimated', symptoms: ['sleepy', 'hack', 'sleepy'], recordedAt: at(2026, 10, 2, 17, 5) },
+      { id: 'bad', onsetFrom: 'x' },
+    ],
+    days: {
+      '2026-11-02': { dose: { status: 'taken', times: [at(2026, 10, 2, 8, 30), at(2026, 10, 2, 7, 30), 'x'], certainty: 'estimated' }, sleep: { hours: 99, short: true }, load: 'heavy' },
+      '2026-11-03': { dose: { status: 'not-taken' } },
+      'nope': { dose: { status: 'taken' } },
+    },
+  });
+  assert.equal(d.declines.length, 1);
+  const x = d.declines[0];
+  assert.equal(x.onsetFrom, at(2026, 10, 2, 16, 30), '역순 범위는 정렬');
+  assert.equal(x.onsetTo, at(2026, 10, 2, 17));
+  assert.deepEqual(x.symptoms, ['sleepy']);
+  assert.equal(x.onsetCertainty, 'estimated');
+  assert.deepEqual(Object.keys(d.days), ['2026-11-02', '2026-11-03']);
+  const day = d.days['2026-11-02'];
+  assert.deepEqual(day.dose.times, [at(2026, 10, 2, 7, 30), at(2026, 10, 2, 8, 30)], '후보 시각 정렬, 잘못된 값 제거');
+  assert.equal(day.sleep.hours, null, '범위 밖 수면 시간은 버림');
+  assert.equal(day.sleep.short, true);
+  assert.equal(day.load, null);
+  assert.equal(d.days['2026-11-03'].dose.status, 'not-taken');
+  assert.deepEqual(Store.empty().declines, []);
+  assert.deepEqual(Store.empty().days, {});
+  const noDose = Store.normalize({ schemaVersion: 2, sessions: [], events: [], days: { '2026-11-04': { load: 'high' } } });
+  assert.equal(noDose.days['2026-11-04'].dose.status, null, '복용 미기록은 null(복용 안 함과 구분)');
+});
+
+test('집중 저하·하루 맥락: 내보내기/가져오기 왕복, 민감 항목 제외 옵션, 병합', () => {
+  const base = Store.normalize({
+    schemaVersion: 2, sessions: [], events: [],
+    declines: [{ id: 'd1', onsetFrom: 10, onsetTo: 10, updatedAt: 5 }],
+    days: { '2026-11-02': { dose: { status: 'taken', times: [1] }, updatedAt: 5 } },
+  });
+  const back = Store.parseImport(Store.toJSON(base)).data;
+  assert.deepEqual(back.declines, base.declines);
+  assert.deepEqual(back.days, base.days);
+  const lean = JSON.parse(Store.toJSON(base, { includeSensitive: false }));
+  assert.ok(!('declines' in lean) && !('days' in lean), '민감 항목 제외');
+  assert.equal(lean.sensitiveExcluded, true);
+  // 과거 백업(민감 항목 없음)을 병합해도 기존 기록 유지
+  const old = Store.parseImport(JSON.stringify({ schemaVersion: 2, sessions: [], events: [] })).data;
+  const m = Store.merge(base, old).data;
+  assert.equal(m.declines.length, 1);
+  assert.ok(m.days['2026-11-02']);
+  // 같은 날짜는 더 최근 updatedAt 우선
+  const newer = Store.normalize({ schemaVersion: 2, sessions: [], events: [], declines: [{ id: 'd2', onsetFrom: 20, onsetTo: 20 }], days: { '2026-11-02': { dose: { status: 'not-taken' }, updatedAt: 9 } } });
+  const m2 = Store.merge(base, newer).data;
+  assert.equal(m2.days['2026-11-02'].dose.status, 'not-taken');
+  assert.equal(m2.declines.length, 2);
+});
+
+test('민감 항목이 없는 v2 데이터·v1 데이터와 호환', () => {
+  const d = Store.migrateV1(V1);
+  assert.deepEqual(d.declines, []);
+  assert.deepEqual(d.days, {});
+});
