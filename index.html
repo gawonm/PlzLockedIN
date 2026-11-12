@@ -8,7 +8,12 @@
   <meta name="theme-color" content="#f3d3da" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icon.svg" type="image/svg+xml" />
-  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="PlzLockedIN" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -20,7 +25,10 @@
 
   <header class="top">
     <h1>PlzLockedIN</h1>
-    <span id="stateLabel" class="state-label">시작 전</span>
+    <div class="top-right">
+      <button id="installBtn" class="install-chip" hidden>앱 설치</button>
+      <span id="stateLabel" class="state-label">시작 전</span>
+    </div>
   </header>
 
   <nav id="tabs" class="tabs" role="tablist" aria-label="화면">
@@ -344,6 +352,12 @@
     <section id="tab-data" class="panel" role="tabpanel" aria-labelledby="tabbtn-data">
       <div class="locked-msg">세션이 끝나면 볼 수 있어요.</div>
       <div class="lockable-content">
+        <div class="card" id="installCard">
+          <h2>앱으로 설치하기</h2>
+          <p id="installStatus" class="small"></p>
+          <button id="installBtnData" class="btn sm primary" hidden>이 기기에 앱 설치</button>
+          <p class="muted small">설치해도 기록은 이 기기의 이 주소에만 저장돼요. 다른 주소(예: localhost)에서 쓰던 기록은 거기서 JSON 백업을 받은 뒤, 설치한 앱의 "가져오기 → 병합"으로 옮기세요.</p>
+        </div>
         <div class="card">
           <h2>내 기록은 이 브라우저에만 있어요</h2>
           <ul class="plain small">

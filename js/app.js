@@ -1180,6 +1180,34 @@
     alert('모든 기록을 삭제했어요.');
   });
 
+  // ───────── 앱 설치 (PWA) — 집중 중에는 설치 버튼도 숨김 ─────────
+  let installPrompt = null;
+  const isStandalone = () => (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+  const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; renderInstall(); });
+  window.addEventListener('appinstalled', () => { installPrompt = null; renderInstall(); });
+  async function promptInstall() {
+    if (!installPrompt) return;
+    const p = installPrompt;
+    installPrompt = null;
+    try { await p.prompt(); await p.userChoice; } catch (e) { /* 사용자가 닫음 */ }
+    renderInstall();
+  }
+  $('installBtn').addEventListener('click', promptInstall);
+  $('installBtnData').addEventListener('click', promptInstall);
+  function renderInstall() {
+    const standalone = isStandalone();
+    $('installBtn').hidden = !installPrompt || standalone || !!activeSession();
+    $('installBtnData').hidden = !installPrompt || standalone;
+    let msg;
+    if (standalone) msg = '지금 설치한 앱으로 실행 중이에요.';
+    else if (!/^https?:$/.test(location.protocol) || !window.isSecureContext) msg = '설치하려면 https 웹앱 주소로 열어야 해요(README 참고).';
+    else if (installPrompt) msg = '버튼을 누르면 이 기기에 앱으로 설치돼요. 설치 후엔 오프라인에서도 열려요.';
+    else if (isIOS()) msg = 'iPhone·iPad: Safari 아래쪽 공유 버튼(네모에 위쪽 화살표) → "홈 화면에 추가"를 누르세요.';
+    else msg = '주소창 오른쪽의 설치 아이콘이나 브라우저 메뉴(⋮)에서 "앱 설치" 또는 "홈 화면에 추가"를 고르세요.';
+    $('installStatus').textContent = msg;
+  }
+
   // ───────── 전체 렌더 ─────────
   function renderTab() {
     if (activeSession() && ui.tab !== 'now') return; // 잠금 중엔 그리지 않음
@@ -1189,6 +1217,7 @@
   }
   function renderAll() {
     applyLock();
+    renderInstall();
     renderNow();
     renderDatalists();
     renderTab();

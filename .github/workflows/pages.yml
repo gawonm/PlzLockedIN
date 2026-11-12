@@ -1,0 +1,49 @@
+# main에 push하면 단위 테스트를 통과한 경우에만 GitHub Pages에 웹앱을 배포한다.
+# 처음 한 번: 저장소 Settings → Pages → Build and deployment → Source를 "GitHub Actions"로 선택.
+name: Deploy web app to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit tests
+        run: node --test tests/stats.test.mjs tests/store.test.mjs
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect app files only (no tests/docs)
+        run: |
+          mkdir _site
+          cp index.html styles.css sw.js manifest.webmanifest icon.svg _site/
+          cp -r js icons _site/
+          touch _site/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

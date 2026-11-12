@@ -5,6 +5,20 @@
 > 목표는 집중력을 강제로 높이는 것이 아닙니다. 기록하는 부담을 거의 없애고, 돌아갈 곳을 바로 보여 주는 것입니다.
 > 판단 기준: "이 앱에 오래 머무르게 하는가?"가 아니라 **"원래 하던 일로 빨리 돌아가게 하는가?"**
 
+## 앱으로 설치 (웹앱)
+웹앱 주소: **https://gawonm.github.io/PlzLockedIN/**
+
+| 기기 | 설치 방법 |
+|---|---|
+| Windows·Mac (Chrome/Edge) | 주소창 오른쪽의 설치 아이콘, 또는 앱 화면 위쪽의 `앱 설치` |
+| Android (Chrome) | `앱 설치` 버튼, 또는 메뉴(⋮) → "앱 설치"/"홈 화면에 추가" |
+| iPhone·iPad (Safari) | 공유 버튼(네모에 위쪽 화살표) → "홈 화면에 추가" |
+
+- 설치하면 브라우저 탭 없이 따로 열리고, 한 번 열어 둔 뒤에는 오프라인에서도 열립니다.
+- 기록은 **기기·주소마다 따로** 저장됩니다. `localhost:8000`에서 쓰던 기록은 거기서 `데이터 → JSON 백업`을 받은 뒤, 설치한 앱에서 `데이터 → 가져오기 → 병합`으로 옮기세요.
+- 배포: `main`에 push하면 `.github/workflows/pages.yml`이 단위 테스트를 통과했을 때만 앱 파일(테스트·문서 제외)을 GitHub Pages에 올립니다.
+  - 처음 한 번은 저장소 **Settings → Pages → Source**를 **GitHub Actions**로 바꿔야 합니다.
+
 ## 실행 (Windows PowerShell)
 
 처음 한 번만 받습니다.
@@ -124,7 +138,8 @@ js/stats.js           통계·인사이트 (순수 함수, Node 테스트 가능
 js/store.js           localStorage 저장, v1→v2 마이그레이션, 내보내기/가져오기
 js/app.js             UI 동작
 sw.js                 오프라인 지원 (항상 새 파일 확인)
-manifest.webmanifest  홈 화면 설치(PWA)
+manifest.webmanifest  앱 설치(PWA) 정보 · icons/ 설치 아이콘
+.github/workflows/    GitHub Pages 자동 배포
 tests/                단위 테스트, 브라우저 E2E 테스트
 ```
 

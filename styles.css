@@ -309,3 +309,8 @@ details.more[open] { padding-bottom: 12px; }
 .dtag { font-size: .72rem; color: var(--muted); line-height: 1.2; overflow-wrap: anywhere; }
 details.dday > summary { min-height: 40px; display: list-item; padding: 6px 0; font-size: .9rem; }
 @media (max-width: 420px) { .drow { grid-template-columns: 52px 1fr 58px; } .time-row { grid-template-columns: 1fr; } }
+
+/* ───────── 앱 설치 ───────── */
+.top-right { display: flex; align-items: center; gap: 8px; }
+.install-chip { border: 1px solid var(--accent-line); background: var(--accent); color: var(--accent-ink); border-radius: 99px; min-height: 32px; padding: 2px 12px; font-size: .875rem; font-weight: 600; cursor: pointer; }
+#installCard #installBtnData { margin: 4px 0 8px; }

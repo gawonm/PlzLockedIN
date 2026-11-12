@@ -18,9 +18,10 @@ try {
   process.exit(2);
 }
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// SITE_DIR로 배포용 묶음(_site)을 지정하면 실제 배포될 파일만으로 검사한다
+const ROOT = path.resolve(process.env.SITE_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const SHOTS = process.env.SHOTS || '';
-const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json' };
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json', '.json': 'application/json', '.png': 'image/png' };
 
 let probe = 0;
 const server = http.createServer((req, res) => {
@@ -506,6 +507,57 @@ try {
     await page.click('#quickRecordBtn');
     ok((await store(page)).events.length === 1, '오프라인에서 기록');
     await ctx.close();
+  }
+
+  // ───────── 앱으로 설치 (PWA) ─────────
+  {
+    const { ctx, page } = await fresh();
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.reload();
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    const cdp = await ctx.newCDPSession(page);
+    const inst = await cdp.send('Page.getInstallabilityErrors');
+    ok(inst.installabilityErrors.length === 0, `Chrome 설치 조건 충족 ${JSON.stringify(inst.installabilityErrors)}`);
+    const man = await cdp.send('Page.getAppManifest');
+    const mj = JSON.parse(man.data);
+    ok(man.errors.length === 0 && mj.short_name === 'PlzLockedIN' && mj.display === 'standalone', `매니페스트 오류 없음 ${JSON.stringify(man.errors)}`);
+    for (const ic of mj.icons.filter((i) => i.type === 'image/png')) {
+      const dim = await page.evaluate(async (src) => { const im = new Image(); im.src = src; await im.decode(); return `${im.naturalWidth}x${im.naturalHeight}`; }, ic.src);
+      ok(dim === ic.sizes, `아이콘 ${ic.src} 실제 크기 ${dim}`);
+    }
+    ok(mj.icons.some((i) => i.purpose === 'maskable'), '마스커블 아이콘');
+    ok(await page.evaluate(async () => { const c = await caches.keys(); const k = c.find((x) => x.startsWith('focus-tracker')); const cache = await caches.open(k); return !!(await cache.match('./icons/icon-192.png')); }), '아이콘도 오프라인 캐시');
+
+    // 설치 버튼: 브라우저가 설치를 제안할 때만, 집중 중엔 숨김
+    ok(await page.isHidden('#installBtn'), '설치 제안 전엔 버튼 숨김');
+    await page.evaluate(() => {
+      const e = new Event('beforeinstallprompt', { cancelable: true });
+      e.prompt = () => { window.__prompted = true; return Promise.resolve(); };
+      e.userChoice = Promise.resolve({ outcome: 'accepted' });
+      window.dispatchEvent(e);
+    });
+    ok(await page.isVisible('#installBtn'), '설치 제안 시 헤더에 "앱 설치"');
+    await page.fill('#nextActionInput', '설치 버튼 확인');
+    await page.click('#startForm button[type=submit]');
+    ok(await page.isHidden('#installBtn'), '집중 중엔 설치 버튼도 숨김');
+    await page.click('#endBtn');
+    ok(await page.isVisible('#installBtn'), '집중을 마치면 다시 표시');
+    await page.click('[data-tab="data"]');
+    ok(await page.isVisible('#installBtnData') && (await page.textContent('#installStatus')).includes('설치돼요'), '데이터 탭 설치 안내');
+    await page.click('#installBtnData');
+    ok(await page.evaluate(() => window.__prompted === true) && await page.isHidden('#installBtn'), '버튼을 누르면 브라우저 설치 창 호출');
+    await shot(page, 'desktop-install');
+    await ctx.close();
+
+    // iPhone Safari: 설치 창 API가 없으므로 안내 문구
+    const ios = await browser.newContext({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1', viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    const ip = await ios.newPage();
+    watch(ip);
+    await ip.goto(URL_);
+    await ip.tap('[data-tab="data"]');
+    ok((await ip.textContent('#installStatus')).includes('홈 화면에 추가'), 'iPhone에선 "홈 화면에 추가" 안내');
+    await shot(ip, 'ios-install');
+    await ios.close();
   }
 
   // ───────── 반응형: 375px 모바일 / 작은 데스크톱 창 / 다크 모드 ─────────
