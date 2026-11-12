@@ -218,6 +218,66 @@ try {
     await ctx.close();
   }
 
+  // ───────── v3 UI: 대시보드 · 테마 ─────────
+  {
+    const { ctx, page } = await fresh();
+    await page.evaluate((d) => localStorage.setItem('focusTracker.v2', JSON.stringify(d)), seededUserData(Date.now()));
+    await page.reload();
+    ok(await page.isVisible('#dashboard') && !(await page.locator('#homeGrid').evaluate((e) => e.classList.contains('solo'))), '시작 화면: 왼쪽 패널 + 오른쪽 대시보드');
+    ok((await page.textContent('#stRec')) === '24개' || /개$/.test(await page.textContent('#stRec')), `이번 달 기록 수 표시 (${await page.textContent('#stRec')})`);
+    const dash = await page.textContent('#dashboard');
+    ok(!/스트릭|연속|streak|점수|놓친 날|Missed/i.test(dash), '대시보드에 스트릭·점수·놓친 날 없음');
+    const cells = await page.locator('#ghMap .gh-cells i').count();
+    ok(cells >= 365 && cells <= 371, `최근 1년 히트맵 칸 ${cells}개`);
+    ok((await page.locator('#ghMap .gh-cells i[title$="미기록"]').count()) > 300, '기록 없는 날은 "미기록"');
+    ok(await page.locator('#ghMap .gh-cells i.today').count() === 1, '오늘 표시');
+    const acts = await page.locator('#activity li').count();
+    ok(acts > 0 && acts <= 6, `최근 활동 ${acts}개`);
+    await page.click('.stat-link');
+    ok(await page.isVisible('#tab-later'), '맡겨둔 생각 카드 → 보관함');
+    await page.click('[data-tab="now"]');
+    await shot(page, 'v3-desktop-start', true);
+    // 집중 중: 대시보드 없음, 한 열
+    await page.fill('#nextActionInput', '대시보드 숨김 확인');
+    await page.click('#startForm button[type=submit]');
+    ok(await page.isHidden('#dashboard') && await page.locator('#homeGrid').evaluate((e) => e.classList.contains('solo')), '집중 중엔 대시보드 숨김');
+    const r = await page.locator('#oopsBtn').boundingBox();
+    ok(Math.abs(r.width - r.height) < 2, '아차 버튼은 동그라미(카운트다운 아님)');
+    await page.click('#endBtn');
+    ok(await page.isHidden('#dashboard'), '돌아보기에도 대시보드 없음');
+    await page.click('#nextFocusBtn');
+    ok((await page.textContent('#activity')).includes('대시보드 숨김 확인'), '마친 세션이 최근 활동에 표시');
+
+    // 테마: 시스템 → 라이트 → 다크 → 시스템, 새로고침 후 유지
+    const bg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    ok((await page.getAttribute('html', 'data-theme')) === null, '기본은 시스템 설정');
+    await page.click('#themeBtn');
+    ok((await page.getAttribute('html', 'data-theme')) === 'light' && (await bg()) === 'rgb(248, 245, 244)', '라이트');
+    await page.click('#themeBtn');
+    ok((await page.getAttribute('html', 'data-theme')) === 'dark' && (await bg()) === 'rgb(18, 17, 28)', '다크(남색 바탕)');
+    ok((await page.getAttribute('meta[name="theme-color"]', 'content')) === '#12111c', '다크일 때 상단 바 색');
+    await page.reload();
+    ok((await page.getAttribute('html', 'data-theme')) === 'dark', '새로고침 후 테마 유지');
+    ok((await page.getAttribute('#themeBtn', 'aria-label')).includes('다크'), '테마 버튼 접근성 이름');
+    const darkPairs = await page.evaluate(() => {
+      const rgb = (s) => s.match(/[\d.]+/g).slice(0, 3).map(Number);
+      const lum = ([r, g, b]) => { const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+      const ratio = (a, b) => { const [x, y] = [lum(rgb(a)), lum(rgb(b))].sort((m, n) => n - m); return (x + 0.05) / (y + 0.05); };
+      const cs = (sel) => getComputedStyle(document.querySelector(sel));
+      return {
+        '주 버튼': ratio(cs('#startForm .btn.primary').color, cs('#startForm .btn.primary').backgroundColor),
+        '카드 보조 글자': ratio(cs('.stat-s').color, cs('.stat').backgroundColor),
+        '활동 보조 글자': ratio(cs('.tl-sub').color, cs('.dash-card').backgroundColor),
+        '탭 글자': ratio(cs('.tab:not(.active)').color, cs('body').backgroundColor),
+      };
+    });
+    for (const [k, v] of Object.entries(darkPairs)) ok(v >= 4.5, `다크 대비 ${k} ${v.toFixed(2)}:1`);
+    await shot(page, 'v3-desktop-start-dark', true);
+    await page.click('#themeBtn');
+    ok((await page.getAttribute('html', 'data-theme')) === null, '다시 시스템 설정');
+    await ctx.close();
+  }
+
   // ───────── 돌아보기: 관찰 하나 · 실험 하나 · 다음 세션에 유지 ─────────
   {
     const { ctx, page } = await fresh();

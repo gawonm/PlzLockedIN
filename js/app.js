@@ -133,6 +133,38 @@
   const touch = (o) => { o.updatedAt = Date.now(); };
   const actionText = (s) => (s && (s.nextAction || [s.task, s.location].filter(Boolean).join(' · '))) || FALLBACK_ACTION;
 
+  // ───────── 화면 테마 (시스템 / 라이트 / 다크) — 이 기기 브라우저에만 기억 ─────────
+  const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+  const THEMES = [
+    { id: 'system', icon: svg('<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/>'), label: '시스템 설정 따름' },
+    { id: 'light', icon: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'), label: '라이트' },
+    { id: 'dark', icon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'), label: '다크' },
+  ];
+  let theme = 'system';
+  try { const t = localStorage.getItem('plz.theme'); if (t === 'light' || t === 'dark') theme = t; } catch (e) { /* 저장 불가 */ }
+  function applyTheme() {
+    const root = document.documentElement;
+    if (theme === 'system') root.removeAttribute('data-theme');
+    else root.setAttribute('data-theme', theme);
+    const t = THEMES.find((x) => x.id === theme);
+    $('themeIcon').innerHTML = t.icon;
+    $('themeBtn').setAttribute('aria-label', `화면 테마: ${t.label} (눌러서 바꾸기)`);
+    $('themeBtn').title = `화면 테마: ${t.label}`;
+    const dark = theme === 'dark' || (theme === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', dark ? '#12111c' : '#f3d3da');
+  }
+  $('themeBtn').addEventListener('click', () => {
+    theme = THEMES[(THEMES.findIndex((x) => x.id === theme) + 1) % THEMES.length].id;
+    try { localStorage.setItem('plz.theme', theme); } catch (e) { /* 저장 불가: 이번 창에서만 적용 */ }
+    applyTheme();
+  });
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    if (mq.addEventListener) mq.addEventListener('change', applyTheme);
+  }
+  applyTheme();
+
   // ───────── 탭 & 잠금 ─────────
   document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
   function switchTab(tab) {
@@ -554,6 +586,12 @@
     $('screenReview').hidden = screen !== 'review';
     $('screenDone').hidden = screen !== 'done';
     $('stateLabel').textContent = { start: '시작 전', focus: '집중 중', review: '돌아보기', done: '오늘은 여기까지' }[screen];
+    // 대시보드는 시작 화면에서만. 집중 중엔 첫 행동과 아차 버튼만.
+    $('homeGrid').classList.toggle('solo', screen !== 'start');
+    $('homeMain').classList.toggle('is-card', screen === 'start' || screen === 'focus');
+    $('dashboard').hidden = screen !== 'start';
+    document.body.classList.toggle('is-focus', screen === 'focus');
+    if (screen === 'start') renderDashboard();
     placeStatus();
     const exp = data.settings.experiment;
 
@@ -1206,6 +1244,69 @@
     else if (isIOS()) msg = 'iPhone·iPad: Safari 아래쪽 공유 버튼(네모에 위쪽 화살표) → "홈 화면에 추가"를 누르세요.';
     else msg = '주소창 오른쪽의 설치 아이콘이나 브라우저 메뉴(⋮)에서 "앱 설치" 또는 "홈 화면에 추가"를 고르세요.';
     $('installStatus').textContent = msg;
+  }
+
+  // ───────── 대시보드 (시작 화면 오른쪽) — 점수·스트릭 없이 관찰만 ─────────
+  function relTime(ts) {
+    const d = Date.now() - ts;
+    if (d < 60e3) return '방금';
+    if (d < 3600e3) return `${Math.floor(d / 60e3)}분 전`;
+    if (d < 86400e3) return `${Math.floor(d / 3600e3)}시간 전`;
+    return mdhm(ts);
+  }
+  function renderDashboard() {
+    const now = new Date();
+    const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const ended = data.sessions.filter((s) => s.endAt != null);
+    const byDay = S.focusMsByDay(ended);
+    const monthMs = Object.entries(byDay).filter(([k]) => k.startsWith(ym)).reduce((a, [, v]) => a + v, 0);
+    const monthSessions = ended.filter((s) => S.dateKey(s.startAt).startsWith(ym)).length;
+    $('stSess').textContent = monthMs ? S.fmtDur(monthMs) : '0분';
+    $('stSessSub').textContent = monthSessions ? `마친 세션 ${monthSessions}개` : '아직 마친 세션이 없어요';
+    const monthEvents = data.events.filter((e) => S.dateKey(e.ts).startsWith(ym));
+    $('stRec').textContent = `${monthEvents.length}개`;
+    const recDays = new Set(monthEvents.map((e) => S.dateKey(e.ts))).size;
+    $('stRecSub').textContent = recDays ? `기록한 날 ${recDays}일 · 알아차린 횟수` : '알아차린 순간을 누른 횟수';
+    $('stLater').textContent = `${data.events.filter((e) => e.keepForLater && !e.laterDone).length}개`;
+
+    // 최근 1년 히트맵: 열 = 주(일요일 시작), 행 = 요일
+    const daily = S.dailyCounts(data.events);
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (52 * 7 + today.getDay()));
+    const cells = [];
+    const months = [];
+    let total = 0;
+    for (let i = 0; ; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      if (d > today) break;
+      const col = Math.floor(i / 7);
+      if (d.getDay() === 0 && d.getDate() <= 7) months.push(`<span style="left:${col * 15}px">${d.getMonth() + 1}월</span>`);
+      const k = S.dateKey(d.getTime());
+      const c = daily[k] || 0;
+      total += c;
+      cells.push(`<i class="c${S.countLevel(c)}${d.getTime() === today.getTime() ? ' today' : ''}" title="${d.getMonth() + 1}/${d.getDate()} · ${c ? `기록 ${c}개` : '미기록'}"></i>`);
+    }
+    const days = ['', '월', '', '수', '', '금', ''].map((w) => `<span>${w}</span>`).join('');
+    $('ghMap').innerHTML = `<div class="gh-months">${months.join('')}</div><div class="gh-days">${days}</div><div class="gh-cells">${cells.join('')}</div>`;
+    $('ghTotal').textContent = `최근 1년 기록 ${total}개`;
+    requestAnimationFrame(() => { $('ghScroll').scrollLeft = $('ghScroll').scrollWidth; });
+
+    // 최근 활동: 마친 세션, 맡긴 생각, 아차 기록
+    const items = [];
+    for (const s of ended) {
+      const n = data.events.filter((e) => e.sessionId === s.id).length;
+      items.push({ ts: s.endAt, dot: '✓', alt: false, title: `<b>${esc(s.task || s.nextAction || '집중')}</b> 집중을 마쳤어요`, sub: `${S.fmtDur(s.endAt - s.startAt)} · 기록 ${n}개 · ${relTime(s.endAt)}` });
+    }
+    for (const e of data.events) {
+      const s = e.sessionId ? data.sessions.find((x) => x.id === e.sessionId) : null;
+      const where = s ? (s.task || s.nextAction || '세션') : '세션 밖';
+      if (e.thought) items.push({ ts: e.ts, dot: '💭', alt: true, title: `생각을 맡겼어요: <b>${esc(e.thought)}</b>`, sub: `${esc(where)} · ${relTime(e.ts)}` });
+      else items.push({ ts: e.ts, dot: '!', alt: true, title: '아차, 알아차렸어요', sub: `${esc(where)} · ${relTime(e.ts)}` });
+    }
+    items.sort((a, b) => b.ts - a.ts);
+    $('activity').innerHTML = items.length
+      ? items.slice(0, 6).map((x) => `<li><span class="tl-dot${x.alt ? ' alt' : ''}" aria-hidden="true">${x.dot}</span><div class="tl-main"><div class="tl-title">${x.title}</div><div class="tl-sub">${x.sub}</div></div></li>`).join('')
+      : '<li class="empty">아직 활동이 없어요. 첫 행동을 적고 시작해 보세요.</li>';
   }
 
   // ───────── 전체 렌더 ─────────

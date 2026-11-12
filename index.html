@@ -15,6 +15,7 @@
   <meta name="apple-mobile-web-app-title" content="PlzLockedIN" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <link rel="stylesheet" href="styles.css" />
+  <script>/* 테마를 그리기 전에 적용(깜빡임 방지) */try{var t=localStorage.getItem('plz.theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
 </head>
 <body>
   <div id="banner" class="banner" role="alert" hidden>
@@ -24,23 +25,27 @@
   </div>
 
   <header class="top">
-    <h1>PlzLockedIN</h1>
-    <div class="top-right">
-      <button id="installBtn" class="install-chip" hidden>앱 설치</button>
-      <span id="stateLabel" class="state-label">시작 전</span>
-    </div>
-  </header>
-
-  <nav id="tabs" class="tabs" role="tablist" aria-label="화면">
+    <div class="top-inner">
+      <h1 class="brand"><span class="brand-mark" aria-hidden="true"></span>PlzLockedIN</h1>
+      <nav id="tabs" class="tabs" role="tablist" aria-label="화면">
     <button class="tab active" id="tabbtn-now" data-tab="now" role="tab" aria-selected="true" aria-controls="tab-now">지금</button>
     <button class="tab" id="tabbtn-later" data-tab="later" role="tab" aria-selected="false" aria-controls="tab-later" data-lockable>보관함</button>
     <button class="tab" id="tabbtn-pattern" data-tab="pattern" role="tab" aria-selected="false" aria-controls="tab-pattern" data-lockable>패턴</button>
-    <button class="tab" id="tabbtn-data" data-tab="data" role="tab" aria-selected="false" aria-controls="tab-data" data-lockable>데이터</button>
-  </nav>
+        <button class="tab" id="tabbtn-data" data-tab="data" role="tab" aria-selected="false" aria-controls="tab-data" data-lockable>데이터</button>
+      </nav>
+      <div class="top-right">
+        <span id="stateLabel" class="state-label">시작 전</span>
+        <button id="installBtn" class="install-chip" hidden>앱 설치</button>
+        <button id="themeBtn" class="icon-chip" type="button" aria-label="화면 테마: 시스템 설정 따름"><span id="themeIcon" aria-hidden="true"></span></button>
+      </div>
+    </div>
+  </header>
 
   <main>
     <!-- ───────── 지금 ───────── -->
     <section id="tab-now" class="panel active" role="tabpanel" aria-labelledby="tabbtn-now">
+     <div class="home-grid" id="homeGrid">
+      <div class="home-main" id="homeMain">
 
       <!-- 01 세션 시작 -->
       <div id="screenStart" class="screen">
@@ -163,6 +168,38 @@
           <button class="btn sm primary" type="submit">보관하고 하던 일로 돌아가기</button>
         </form>
       </div>
+      </div>
+
+      <!-- 대시보드: 시작 화면에서만. 집중 중에는 보이지 않음 -->
+      <aside id="dashboard" class="home-side" aria-label="최근 기록 요약">
+        <div class="stat-row">
+          <div class="stat">
+            <div class="stat-l">이번 달 집중 세션</div>
+            <div class="stat-v" id="stSess">0분</div>
+            <div class="stat-s" id="stSessSub"></div>
+          </div>
+          <div class="stat">
+            <div class="stat-l">이번 달 아차 기록</div>
+            <div class="stat-v" id="stRec">0개</div>
+            <div class="stat-s" id="stRecSub"></div>
+          </div>
+          <button type="button" class="stat stat-link" data-goto="later">
+            <span class="stat-l">맡겨둔 생각</span>
+            <span class="stat-v" id="stLater">0개</span>
+            <span class="stat-s">보관함에서 보기 ›</span>
+          </button>
+        </div>
+        <section class="dash-card">
+          <div class="dash-head"><h2>올해 기록</h2><span class="muted small" id="ghTotal"></span></div>
+          <div class="gh-scroll" id="ghScroll"><div class="gh" id="ghMap" role="img" aria-label="최근 1년 날짜별 기록 수"></div></div>
+          <div class="gh-legend"><span>적음</span><i class="c0"></i><i class="c1"></i><i class="c2"></i><i class="c3"></i><i class="c4"></i><span>많음</span><span class="muted">· 색은 기록 수일 뿐, 좋고 나쁨이 아니에요</span></div>
+        </section>
+        <section class="dash-card">
+          <h2>최근 활동</h2>
+          <ol id="activity" class="timeline"></ol>
+        </section>
+      </aside>
+     </div>
     </section>
 
     <!-- ───────── 보관함 ───────── -->
